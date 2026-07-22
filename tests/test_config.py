@@ -2,17 +2,17 @@ from __future__ import annotations
 import pathlib
 import pytest
 import hashlib
-import confighelper
 import shutil
 import time
+from moonraker import confighelper
 from moonraker.confighelper import ConfigError
 from moonraker.server import Server
 from moonraker.utils import ServerError
 from moonraker.components import gpio
-from mocks import MockGpiod
+from mocks import MockPeripheryGPIO
 from typing import TYPE_CHECKING, Dict
 if TYPE_CHECKING:
-    from confighelper import ConfigHelper
+    from moonraker.confighelper import ConfigHelper
 
 @pytest.fixture(scope="class")
 def config(base_server: Server) -> ConfigHelper:
@@ -34,9 +34,7 @@ def test_config(config: ConfigHelper,
 def gpio_config(test_config: ConfigHelper,
                 monkeypatch: pytest.MonkeyPatch
                 ) -> ConfigHelper:
-    def load_gpio_mock(name: str) -> MockGpiod:
-        return MockGpiod()
-    monkeypatch.setattr(gpio, "load_system_module", load_gpio_mock)
+    monkeypatch.setattr(gpio.periphery, "GPIO", MockPeripheryGPIO)
     yield test_config
     server = test_config.get_server()
     gpio_comp = server.lookup_component("gpio", None)
@@ -125,10 +123,10 @@ class TestGetString:
         test_config.get("test_string", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_string' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetInt:
     def test_get_int_exists(self, test_config: ConfigHelper):
@@ -168,10 +166,10 @@ class TestGetInt:
         test_config.getint("test_int", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_int' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetFloat:
     def test_get_float_exists(self, test_config: ConfigHelper):
@@ -211,10 +209,10 @@ class TestGetFloat:
         test_config.getfloat("test_float", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_float' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetBoolean:
     def test_get_boolean_exists(self, test_config: ConfigHelper):
@@ -233,10 +231,10 @@ class TestGetBoolean:
         test_config.getboolean("test_bool", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_bool' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetList:
     def test_get_list_exists(self, test_config: ConfigHelper):
@@ -268,10 +266,10 @@ class TestGetList:
         test_config.getlist("test_list", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_list' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetDict:
     def test_get_dict_exists(self, test_config: ConfigHelper):
@@ -299,10 +297,10 @@ class TestGetDict:
         test_config.getdict("test_dict", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_dict' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetTemplate:
     def test_get_template_exists(self, test_config: ConfigHelper):
@@ -345,10 +343,10 @@ class TestGetTemplate:
         test_config.gettemplate("test_template", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_template' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetGpioOut:
     def test_get_gpio_exists(self, gpio_config: ConfigHelper):
@@ -419,10 +417,10 @@ class TestGetGpioOut:
         gpio_config.getgpioout("test_gpio", deprecate=True)
         expected = (
             f"[test_options]: Option 'test_gpio' is "
-            "deprecated, see the configuration documention "
-            "at https://moonraker.readthedocs.io/en/latest/configuration"
+            "deprecated, see the configuration documentation "
+            "at https://moonraker.readthedocs.io/en/latest/configuration/"
         )
-        assert expected in server.warnings
+        assert expected in server.warnings.values()
 
 class TestGetConfiguration:
     def test_get_config_no_exist(self, base_server: Server):

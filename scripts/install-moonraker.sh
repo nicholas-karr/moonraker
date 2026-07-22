@@ -414,7 +414,7 @@ WantedBy=multi-user.target
 
 [Service]
 Type=simple
-User=$USER
+User=$(id -un)
 SupplementaryGroups=moonraker-admin
 RemainAfterExit=yes
 EnvironmentFile=${ENV_FILE}

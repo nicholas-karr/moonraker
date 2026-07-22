@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import apprise
+import asyncio
+import functools
 import logging
 import pathlib
 import re
@@ -25,10 +27,26 @@ if TYPE_CHECKING:
     from ..common import WebRequest
     from .file_manager.file_manager import FileManager
     from .klippy_apis import KlippyAPI as APIComp
+    from .klippy_connection import KlippyConnection
+
+# System health events, distinct from JobEvent: some are raised elsewhere
+# in Moonraker today (klippy_shutdown/klippy_disconnect/cpu_throttled) but
+# never reach a notifier; disk_low/disk_recovered/cpu_temp_high/
+# cpu_temp_normal are raised by the health_monitor component.
+SYSTEM_EVENTS = [
+    "klippy_shutdown",
+    "klippy_disconnect",
+    "cpu_throttled",
+    "disk_low",
+    "disk_recovered",
+    "cpu_temp_high",
+    "cpu_temp_normal",
+]
 
 class Notifier:
     def __init__(self, config: ConfigHelper) -> None:
         self.server = config.get_server()
+        self.event_loop = self.server.get_event_loop()
         self.notifiers: Dict[str, NotifierInstance] = {}
         self.events: Dict[str, List[NotifierInstance]] = {}
         prefix_sections = config.get_prefix_sections("notifier")
@@ -44,6 +62,9 @@ class Notifier:
                     evt_name = str(job_event)
                     if "*" in notifier.events or evt_name in notifier.events:
                         self.events.setdefault(evt_name, []).append(notifier)
+                for evt_name in SYSTEM_EVENTS:
+                    if "*" in notifier.events or evt_name in notifier.events:
+                        self.events.setdefault(evt_name, []).append(notifier)
                 logging.info(f"Registered notifier: '{notifier.get_name()}'")
             except Exception as e:
                 msg = f"Failed to load notifier[{cfg.get_name()}]\n{e}"
@@ -55,6 +76,20 @@ class Notifier:
         self.server.register_event_handler(
             "job_state:state_changed", self._on_job_state_changed
         )
+        for evt_name in ("klippy_shutdown", "klippy_disconnect"):
+            self.server.register_event_handler(
+                f"server:{evt_name}",
+                functools.partial(self._on_klippy_state_event, evt_name)
+            )
+        self.server.register_event_handler(
+            "proc_stats:cpu_throttled", self._on_cpu_throttled
+        )
+        for evt_name in (
+            "disk_low", "disk_recovered", "cpu_temp_high", "cpu_temp_normal"
+        ):
+            self.server.register_event_handler(
+                evt_name, functools.partial(self._dispatch_system_event, evt_name)
+            )
 
     def register_remote_actions(self):
         self.server.register_remote_method("notify", self.notify_action)
@@ -74,6 +109,50 @@ class Notifier:
         evt_name = str(job_event)
         for notifier in self.events.get(evt_name, []):
             await notifier.notify(evt_name, [prev_stats, new_stats])
+
+    async def _dispatch_system_event(
+        self, evt_name: str, message: str = ""
+    ) -> None:
+        for notifier in self.events.get(evt_name, []):
+            await notifier.notify(evt_name, [], message)
+
+    async def _on_klippy_state_event(self, evt_name: str) -> None:
+        kconn: KlippyConnection = self.server.lookup_component(
+            "klippy_connection"
+        )
+        if evt_name != "klippy_disconnect":
+            await self._dispatch_system_event(evt_name, kconn.state_message)
+            return
+        message = kconn.state_message
+        for notifier in self.events.get(evt_name, []):
+            if notifier.min_disconnect_duration <= 0.:
+                await notifier.notify(evt_name, [], message)
+            else:
+                self.event_loop.create_task(
+                    self._notify_after_disconnect(notifier, kconn, message)
+                )
+
+    async def _notify_after_disconnect(
+        self,
+        notifier: NotifierInstance,
+        kconn: KlippyConnection,
+        message: str
+    ) -> None:
+        # Routine restarts (RESTART/FIRMWARE_RESTART, a Klipper service
+        # bounce, etc.) briefly disconnect Klippy before it reconnects on
+        # its own. Wait out the notifier's configured grace period and only
+        # notify if Klippy is still disconnected once it elapses, so those
+        # routine restarts don't page anyone.
+        await asyncio.sleep(notifier.min_disconnect_duration)
+        if not kconn.is_connected():
+            await notifier.notify("klippy_disconnect", [], message)
+
+    async def _on_cpu_throttled(self, throttled_state: Dict[str, Any]) -> None:
+        flags = throttled_state.get("flags", [])
+        message = (
+            "CPU throttled: " + ", ".join(flags) if flags else "CPU throttled"
+        )
+        await self._dispatch_system_event("cpu_throttled", message)
 
     def register_endpoints(self, config: ConfigHelper):
         self.server.register_endpoint(
@@ -136,6 +215,9 @@ class NotifierInstance:
             raise config.error(f"Invalid body_format for {config.get_name()}")
         self.body_format = getattr(apprise.NotifyFormat, upper_body_format)
         self.events: List[str] = config.getlist("events", separator=",")
+        self.min_disconnect_duration = config.getfloat(
+            "min_disconnect_duration", 0., minval=0.
+        )
         self.apprise.add(self.url)
 
     def as_dict(self):
@@ -146,6 +228,7 @@ class NotifierInstance:
             "body": self.config.get("body", None),
             "body_format": self.config.get("body_format", None),
             "events": self.events,
+            "min_disconnect_duration": self.min_disconnect_duration,
             "attach": self.attach
         }
 

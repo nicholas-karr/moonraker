@@ -73,6 +73,15 @@ JWT_HEADER = {
     'typ': "JWT"
 }
 
+# Cloudflare (full proxy or Tunnel/cloudflared, always) adds these to every
+# request it forwards to the origin - their presence means the request came
+# through Cloudflare's edge, regardless of what remote_ip looks like. Used
+# by force_login_bypass_trusted below so a tunneled remote request (which
+# reaches Moonraker over loopback, indistinguishable BY IP ALONE from
+# someone on the actual LAN) doesn't wrongly inherit a trusted_clients bypass
+# meant for the local network.
+CF_HEADERS = ("Cf-Connecting-Ip", "Cf-Ray")
+
 class UserSqlDefinition(SqlTableDefinition):
     name = USER_TABLE
     prototype = (
@@ -126,6 +135,12 @@ class Authorization:
         self.server = config.get_server()
         self.login_timeout = config.getint('login_timeout', 90)
         self.force_logins = config.getboolean('force_logins', False)
+        # Not read from [authorization] in moonraker.conf - like force_logins
+        # above, [simple_password_auth] is the only intended on/off switch
+        # for these two and sets them directly on this instance, so there's
+        # no separate config option here for them to drift out of sync with.
+        self.sessions_never_expire = False
+        self.force_login_bypass_trusted = False
         self.default_source = config.get('default_source', "moonraker").lower()
         self.enable_api_key = config.getboolean('enable_api_key', True)
         self.max_logins = config.getint("max_login_attempts", None, above=0)
@@ -653,6 +668,8 @@ class Authorization:
     def decode_jwt(
         self, token: str, token_type: str = "access", check_exp: bool = True
     ) -> UserInfo:
+        if self.sessions_never_expire:
+            check_exp = False
         message, sig = token.rsplit('.', maxsplit=1)
         enc_header, enc_payload = message.split('.')
         header: Dict[str, Any] = jsonw.loads(base64url_decode(enc_header))
@@ -881,6 +898,12 @@ class Authorization:
         # If the force_logins option is enabled and at least one user is created
         # then trusted user authentication is disabled
         if self.force_logins and len(self.users) > 1:
+            if self.force_login_bypass_trusted and not self._looks_like_cloudflare(
+                request
+            ):
+                trusted_user = await self._check_trusted_connection(ip)
+                if trusted_user is not None:
+                    return trusted_user
             if not auth_required:
                 return None
             raise HTTPError(401, "Unauthorized, Force Logins Enabled")
@@ -894,6 +917,9 @@ class Authorization:
             return None
 
         raise HTTPError(401, "Unauthorized")
+
+    def _looks_like_cloudflare(self, request: HTTPServerRequest) -> bool:
+        return any(request.headers.get(h) for h in CF_HEADERS)
 
     async def check_cors(self, origin: Optional[str]) -> bool:
         if origin is None or not self.cors_domains:

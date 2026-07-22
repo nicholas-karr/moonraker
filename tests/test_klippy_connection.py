@@ -4,12 +4,12 @@ import asyncio
 import pathlib
 from typing import TYPE_CHECKING, Dict
 from moonraker.server import ServerError
-from moonraker.klippy_connection import KlippyRequest
+from moonraker.components.klippy_connection import KlippyRequest
 from mocks import MockReader, MockWriter
 
 if TYPE_CHECKING:
-    from server import Server
-    from conftest import KlippyProcess
+    from moonraker.server import Server
+    from fixtures import KlippyProcess
 
 @pytest.mark.usefixtures("klippy")
 @pytest.mark.asyncio
@@ -99,7 +99,9 @@ async def test_status_update(ready_server: Server, klippy: KlippyProcess):
 @pytest.mark.asyncio
 async def test_klippy_error(ready_server: Server):
     kconn = ready_server.klippy_connection
-    assert kconn.state == "error"
+    # kconn.state is a KlippyState enum (see moonraker/common.py); its
+    # __str__ produces the lowercase name used for comparison elsewhere.
+    assert str(kconn.state) == "error"
 
 @pytest.mark.run_paths(printer_cfg="missing_reqs.cfg")
 @pytest.mark.asyncio
@@ -169,10 +171,14 @@ async def test_no_uds_access(base_server: Server,
 
 @pytest.mark.asyncio
 async def test_write_not_connected(base_server: Server):
+    # KlippyRequest reports failures through its internal future (see
+    # set_exception()/wait() in moonraker/components/klippy_connection.py),
+    # not a "response" attribute.
     req = KlippyRequest("", {})
     kconn = base_server.klippy_connection
     await kconn._write_request(req)
-    assert isinstance(req.response, ServerError)
+    with pytest.raises(ServerError):
+        await req.wait()
 
 @pytest.mark.asyncio
 async def test_write_error(base_server: Server):
@@ -180,7 +186,8 @@ async def test_write_error(base_server: Server):
     kconn = base_server.klippy_connection
     kconn.writer = MockWriter()
     await kconn._write_request(req)
-    assert isinstance(req.response, ServerError)
+    with pytest.raises(ServerError):
+        await req.wait()
 
 @pytest.mark.asyncio
 async def test_write_cancelled(base_server: Server):
@@ -233,13 +240,17 @@ def test_process_unknown_request(base_server: Server,
     expected = f"No request matching request ID: 4543, response: {cmd}"
     assert expected == caplog.messages[-1]
 
-def test_process_invalid_request(base_server: Server):
+@pytest.mark.asyncio
+async def test_process_invalid_request(base_server: Server):
+    # KlippyRequest() requires a running event loop (it calls
+    # asyncio.get_running_loop() internally), so this must be an async test.
     req = KlippyRequest("", {})
     kconn = base_server.klippy_connection
     kconn.pending_requests[req.id] = req
     cmd = {"id": req.id}
     kconn._process_command(cmd)
-    assert isinstance(req.response, ServerError)
+    with pytest.raises(ServerError):
+        await req.wait()
 
 # TODO: This can probably go in a class with test apis
 @pytest.mark.asyncio

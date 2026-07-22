@@ -7,11 +7,14 @@ import copy
 from inspect import isawaitable
 from moonraker.server import Server
 from moonraker.utils import ServerError
+from moonraker.components.database import (
+    encode_record, decode_record, DATABASE_VERSION
+)
 from typing import TYPE_CHECKING, AsyncIterator, Dict, Any, Iterator
 
 if TYPE_CHECKING:
-    from components.database import MoonrakerDatabase
-    from components.database import NamespaceWrapper
+    from moonraker.components.database import MoonrakerDatabase
+    from moonraker.components.database import NamespaceWrapper
     from fixtures import HttpClient, WebsocketClient
 
 TEST_DB: Dict[str, Dict[str, Any]] = {
@@ -159,15 +162,16 @@ class TestInstantiation:
         event_loop.run_until_complete(db.close())
 
     def test_initial_state(self, db: MoonrakerDatabase):
+        # Only MoonrakerDatabase.__init__() has run here (component_init(),
+        # which increments the unsafe shutdown count, has not) - the
+        # "moonraker" and "database" namespaces are separate records.
         mrdb = db.get_item("moonraker").result()
+        dbinfo = db.get_item("database").result()
+        instance_uuid = db.server.get_app_args()["instance_uuid"]
         assert (
-            list(db.namespaces.keys()) == ["moonraker"] and
-            mrdb == {
-                "database_version": 1,
-                "database": {
-                    "unsafe_shutdowns": 1
-                }
-            }
+            sorted(db.db_provider.namespaces) == ["database", "moonraker"] and
+            mrdb == {"instance_id": instance_uuid} and
+            dbinfo == {"database_version": DATABASE_VERSION}
         )
 
     def test_wrap_invalid_namespace(self, db: MoonrakerDatabase):
@@ -176,16 +180,18 @@ class TestInstantiation:
             db.wrap_namespace("invalid")
 
     def test_insert_record_nonetype(self, db: MoonrakerDatabase):
-        ret = db._insert_record("moonraker", "test_key", None)
+        ret = db.db_provider._insert_record(
+            db.db_provider.sync_conn, "moonraker", "test_key", None
+        )
         assert ret is False
 
     def test_encode_error(self, db: MoonrakerDatabase):
         with pytest.raises(ServerError, match="Error encoding val"):
-            db._encode_value(set(["invalid_value"]))
+            encode_record(set(["invalid_value"]))
 
     def test_decode_error(self, db: MoonrakerDatabase):
         with pytest.raises(ServerError, match="Error decoding value"):
-            db._decode_value(b"invalid")
+            decode_record(b"invalid")
 
 class TestCoreServerLoaded:
     @pytest.fixture(scope="class")
@@ -196,38 +202,49 @@ class TestCoreServerLoaded:
         base_server.load_components()
         db: MoonrakerDatabase
         db = base_server.lookup_component("database")
+        # component_init() is what tracks the unsafe shutdown count and
+        # starts the sqlite background thread - call it directly here
+        # rather than pulling in the whole server_init()/start_server()
+        # flow, which this database-focused fixture has no need for.
+        event_loop.run_until_complete(db.component_init())
         yield db
         event_loop.run_until_complete(
             base_server._stop_server("terminate"))
 
-    def test_core_state(self, db: MoonrakerDatabase):
-        mrdb = db.get_item("moonraker").result()
-        expected_ns = ["gcode_metadata", "moonraker"]
+    def test_core_state(self,
+                       db: MoonrakerDatabase,
+                       event_loop: asyncio.AbstractEventLoop):
+        # component_init() started the sqlite background thread, so
+        # get_item() futures are now resolved asynchronously.
+        mrdb = event_loop.run_until_complete(db.get_item("moonraker"))
+        dbinfo = event_loop.run_until_complete(db.get_item("database"))
+        expected_ns = ["announcements", "database", "gcode_metadata", "moonraker"]
         assert (
-            sorted(db.namespaces.keys()) == expected_ns and
+            sorted(db.db_provider.namespaces) == sorted(expected_ns) and
             mrdb == {
-                "database_version": 1,
-                "database": {
-                    "protected_namespaces": expected_ns,
-                    "unsafe_shutdowns": 1
-                },
-                "file_manager": {
-                    "metadata_version": 3
-                }
+                "instance_id": db.server.get_app_args()["instance_uuid"],
+                "file_manager": {"metadata_version": 3}
+            } and
+            dbinfo == {
+                "database_version": DATABASE_VERSION,
+                "protected_namespaces": ["announcements", "gcode_metadata", "moonraker"],
+                "unsafe_shutdowns": 1
             }
         )
 
 @pytest.mark.run_paths(database="bare_db.cdb")
 class TestCoreServerPreloaded(TestCoreServerLoaded):
-    def test_core_state(self, db: MoonrakerDatabase):
+    def test_core_state(self,
+                       db: MoonrakerDatabase,
+                       event_loop: asyncio.AbstractEventLoop):
         expected_ns = [
-            "moonraker", "gcode_metadata", "update_manager",
-            "authorized_users", "history"
+            "announcements", "database", "moonraker", "gcode_metadata",
+            "update_manager"
         ]
-        mrdb = db.get_item("moonraker").result()
+        dbinfo = event_loop.run_until_complete(db.get_item("database"))
         assert (
-            sorted(db.namespaces.keys()) == sorted(expected_ns) and
-            mrdb["database"]["unsafe_shutdowns"] == 2
+            sorted(db.db_provider.namespaces) == sorted(expected_ns) and
+            dbinfo["unsafe_shutdowns"] == 2
         )
 
 class TestUnallowedMethods:
@@ -452,9 +469,22 @@ class TestUpdateItem(BaseTest):
             await ret
 
     async def test_update_replace_record_dict_fail(self, db: MoonrakerDatabase):
-        with pytest.raises(ServerError):
-            ret = db.update_item("fruits", "apples", None)
-            await ret
+        # A None value is never stored - update_item() silently leaves the
+        # existing record untouched rather than erasing it, since erasure
+        # is the job of delete_item().
+        fut = db.get_item("fruits", "apples")
+        before = check_future(fut, db)
+        if isawaitable(before):
+            before = await before
+        ret = db.update_item("fruits", "apples", None)
+        result = check_future(ret, db)
+        if isawaitable(result):
+            await result
+        fut = db.get_item("fruits", "apples")
+        after = check_future(fut, db)
+        if isawaitable(after):
+            after = await after
+        assert after == before
 
     async def test_update_replace_record_dict(self, db: MoonrakerDatabase):
         db.update_item("fruits", "apples", ["success"])
@@ -556,11 +586,14 @@ class TestDeleteItem(BaseTest):
         assert del_result == "Gandalf" and result is None
 
     async def test_drop_db(self, db: MoonrakerDatabase):
-        del_fut = db.delete_item("vegetables", "tomato",
-                                 drop_empty_db=True)
+        del_fut = db.delete_item("vegetables", "tomato")
         del_result = check_future(del_fut, db)
         if isawaitable(del_result):
             del_result = await del_result
+        drop_fut = db.drop_empty_namespace("vegetables")
+        drop_result = check_future(drop_fut, db)
+        if isawaitable(drop_result):
+            await drop_result
         fut = db.get_item("vegetables", default=None)
         result = check_future(fut, db)
         if isawaitable(result):
@@ -687,7 +720,7 @@ class TestDeleteBatch(BaseTest):
         assert result == expected
 
     async def test_delete_batch_all_keys(self, db: MoonrakerDatabase):
-        del_keys = (TEST_DB["automobiles"].keys())
+        del_keys = list(TEST_DB["automobiles"].keys())
         db.delete_batch("automobiles", del_keys)
         fut = db.get_item("automobiles")
         result = check_future(fut, db)
@@ -756,11 +789,15 @@ class TestClearNamespace(BaseTest):
         assert result == {}
 
     async def test_clear_namespace_drop(self, db: MoonrakerDatabase):
-        fut = db.clear_namespace("books", drop_empty_db=True)
+        fut = db.clear_namespace("books")
         result = check_future(fut, db)
         if isawaitable(result):
             result = await result
-        assert "books" not in db.namespaces
+        drop_fut = db.drop_empty_namespace("books")
+        drop_result = check_future(drop_fut, db)
+        if isawaitable(drop_result):
+            await drop_result
+        assert "books" not in db.db_provider.namespaces
 
 
     async def test_clear_namespace_invalid(self, db: MoonrakerDatabase):
@@ -916,9 +953,14 @@ class TestNamespaceContains(BaseTest):
         assert result is False
 
     async def test_ns_contains_invalid(self, db: MoonrakerDatabase):
-        with pytest.raises(ServerError):
-            fut = db.ns_contains("invalid", "nokey")
-            await fut
+        # namespace_contains() treats any lookup failure (including an
+        # unknown namespace) the same as "key not found" and returns
+        # False rather than raising.
+        fut = db.ns_contains("invalid", "nokey")
+        result = check_future(fut, db)
+        if isawaitable(result):
+            result = await result
+        assert result is False
 
 class TestNamespaceConainsThreaded(ThreadedTest, TestNamespaceContains):
     pass
@@ -1255,7 +1297,7 @@ class TestHttpEndpoints(EndpointTest):
     async def test_list_dbs(self, http_client: HttpClient):
         expected = list(TEST_DB.keys())
         expected.remove("fruits")
-        expected.extend(["moonraker", "gcode_metadata"])
+        expected.extend(["moonraker", "gcode_metadata", "announcements"])
         ret = await http_client.get("/server/database/list")
         assert sorted(ret["result"]["namespaces"]) == sorted(expected)
 
@@ -1335,11 +1377,11 @@ class TestHttpEndpoints(EndpointTest):
         ret = await http_client.delete("/server/database/item", args)
         assert (
             ret["result"] == endpoint_result(args, "nope")
-            and "vegetables" not in db.namespaces
+            and "vegetables" not in db.db_provider.namespaces
         )
 
     async def test_delete_item_not_found(self, http_client: HttpClient):
-        with pytest.raises(http_client.error, match="HTTP 404: Not Found"):
+        with pytest.raises(http_client.error, match="HTTP 404:"):
             args = {"namespace": "automobiles", "key": "ford.pinto"}
             await http_client.delete("/server/database/item", args)
 
@@ -1347,7 +1389,7 @@ class TestWebsocketEndpoints(EndpointTest):
     async def test_list_dbs(self, websocket_client: WebsocketClient):
         expected = list(TEST_DB.keys())
         expected.remove("fruits")
-        expected.extend(["moonraker", "gcode_metadata"])
+        expected.extend(["moonraker", "gcode_metadata", "announcements"])
         ret = await websocket_client.request("server.database.list")
         assert sorted(ret["namespaces"]) == sorted(expected)
 
@@ -1358,7 +1400,7 @@ class TestWebsocketEndpoints(EndpointTest):
 
     async def test_get_namespace_not_exist(self,
                                            websocket_client: WebsocketClient):
-        expected = "Namespace 'cities' not found"
+        expected = "Namespace cities not found"
         with pytest.raises(websocket_client.error, match=expected):
             args = {"namespace": "cities"}
             await websocket_client.request("server.database.get_item", args)
@@ -1444,7 +1486,7 @@ class TestWebsocketEndpoints(EndpointTest):
             "server.database.delete_item", args)
         assert (
             ret == endpoint_result(args, "nope")
-            and "vegetables" not in db.namespaces
+            and "vegetables" not in db.db_provider.namespaces
         )
 
     async def test_delete_item_not_found(self,

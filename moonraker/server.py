@@ -572,7 +572,10 @@ async def launch_server(
             f"Loading most recent working configuration: '{backup_cfg}'\n"
             f"Please fix the issue in moonraker.conf and restart the server."
         )
-        return True
+        # None signals the main() loop to retry launch_server() - on the
+        # next attempt is_backup_config is already True, so
+        # confighelper.get_configuration() loads backup_config instead.
+        return None
     except Exception:
         logging.exception("Moonraker Error")
         return 1

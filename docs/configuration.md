@@ -3166,6 +3166,16 @@ events: *
 #      cancelled
 #      paused
 #      resumed
+#   Valid system health events (see the [health_monitor] section below for
+#   disk_low/disk_recovered/cpu_temp_high/cpu_temp_normal, the others are
+#   raised elsewhere in Moonraker):
+#      klippy_shutdown
+#      klippy_disconnect
+#      cpu_throttled
+#      disk_low
+#      disk_recovered
+#      cpu_temp_high
+#      cpu_temp_normal
 #   This option may also be set to "gcode" if the notifier should only push
 #   "gcode_macro" notifications sent from Klipper. This parameter must be provided.
 body: "Your printer status has changed to {event_name}"
@@ -3197,18 +3207,32 @@ attach:
 #   Note: Attachments are not available for all notification services, refer to
 #   the Apprise documentation for details. Be aware that links to items hosted on
 #   your local network can only be viewed within that network.
+min_disconnect_duration: 0
+#   Only meaningful when "klippy_disconnect" is one of the subscribed
+#   events. Klippy disconnects briefly during routine restarts (RESTART,
+#   FIRMWARE_RESTART, a Klipper service bounce) before reconnecting on its
+#   own. When set above 0, the notifier waits this many seconds after a
+#   disconnect and only sends the notification if Klippy is still
+#   disconnected once that time has elapsed, so routine restarts don't
+#   trigger a notification. The default of 0 notifies immediately, as
+#   before.
 ```
 
 /// Tip
 The `event_args` field of the Jinja2 context passed to templates in
 this section receives a list of "arguments" passed to the event.  For
 those familiar with Python this list is known as "variable arguments".
-Currently the notifier only supports two kinds of events: those
-triggered by a change in the job state and those triggered from a remote
-method call from a `gcode_macro`.
+Currently the notifier supports three kinds of events: those triggered by
+a change in the job state, those triggered from a remote method call from
+a `gcode_macro`, and system health events (`klippy_shutdown`,
+`klippy_disconnect`, `cpu_throttled`, `disk_low`, `disk_recovered`,
+`cpu_temp_high`, `cpu_temp_normal`).
 
-For `remote method` events the `event_args` field will always be
-an empty list.  For `job state` events the `event_args` field will
+For `remote method` and system health events the `event_args` field will
+always be an empty list; use `event_message` instead, which contains a
+human-readable description (the Klippy shutdown/disconnect reason, the
+throttle flags, or the disk/temperature reading that crossed the
+configured threshold). For `job state` events the `event_args` field will
 contain two items. The first item (`event_args[0]`) contains the
 job state recorded prior to the event, the second item (`event_args[1]`)
 contains the current job state.  In most cases users will be interested
@@ -3245,6 +3269,12 @@ url: tgram://{bottoken}/{ChatID}
 events: gcode
 body: {event_message}
 attach: http://192.168.1.100/webcam/?action=snapshot
+
+[notifier system_health]
+url: ntfy://ntfy.sh/{ntfy_topic}
+events: klippy_shutdown,klippy_disconnect,cpu_throttled,disk_low,cpu_temp_high
+title: Printer alert
+body: {event_message}
 ```
 
 #### Notifying from Klipper
@@ -3258,6 +3288,33 @@ gcode:
   {action_call_remote_method("notify",
                              name="my_telegram_notifier",
                              message="Filament change needed!")}
+```
+
+### `[health_monitor]`
+
+Watches disk space and (optionally) CPU temperature, raising the
+`disk_low` / `disk_recovered` / `cpu_temp_high` / `cpu_temp_normal` events
+consumed by `[notifier]` above. Disk usage is checked across every
+filesystem backing a registered `file_manager` root (`gcodes`, `config`,
+`logs`, etc, deduplicated so multiple roots on the same disk don't
+double-alert). Each condition only fires once when it crosses the
+threshold and once when it recovers, not on every check.
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[health_monitor]
+disk_threshold: 90
+#   Percentage of disk usage, on any filesystem backing a registered
+#   file_manager root, at or above which "disk_low" is raised. The
+#   default is 90.
+disk_check_interval: 300
+#   How often (in seconds) to check disk usage. The default is 300.
+cpu_temp_threshold:
+#   CPU temperature (Celsius) at or above which "cpu_temp_high" is raised.
+#   "cpu_temp_normal" fires once the temperature drops 5C below this
+#   value. Safe temperatures vary significantly by board, so this check
+#   is disabled unless a value is set. The default is no check.
 ```
 
 ### `[simplyprint]`

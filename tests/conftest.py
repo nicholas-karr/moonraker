@@ -9,10 +9,12 @@ import sys
 import shlex
 import tempfile
 import subprocess
-from typing import Iterator, Dict, AsyncIterator, Any
+import uuid
+from typing import Iterator, Dict, AsyncIterator, Any, List, Optional
 from moonraker.server import Server
 from moonraker.eventloop import EventLoop
-from moonraker import utils
+from moonraker.loghelper import LogManager
+from moonraker import confighelper
 import dbtool
 from fixtures import KlippyProcess, HttpClient, WebsocketClient
 
@@ -67,7 +69,10 @@ def session_args(ssl_certs: Dict[str, pathlib.Path]
     pcfg_asset = ASSETS.joinpath(f"klipper/base_printer.cfg")
     with tempfile.TemporaryDirectory(prefix="moonraker-test") as tmpdir:
         tmp_path = pathlib.Path(tmpdir)
-        secrets_dest = tmp_path.joinpath("secrets.ini")
+        # Secrets are discovered at a fixed location under data_path
+        # (see moonraker/components/secrets.py); the legacy [secrets]
+        # secrets_path config option is deprecated, so tests don't set it.
+        secrets_dest = tmp_path.joinpath("moonraker.secrets")
         shutil.copy(secrets_asset, secrets_dest)
         cfg_path = tmp_path.joinpath("config")
         cfg_path.mkdir()
@@ -85,6 +90,7 @@ def session_args(ssl_certs: Dict[str, pathlib.Path]
             "log_path": log_path,
             "gcode_path": gcode_path,
             "secrets_path": secrets_dest,
+            "secrets_asset_name": secrets_asset.name,
             "klippy_uds_path": tmp_path.joinpath("klippy_uds"),
             "klippy_pty_path": tmp_path.joinpath("klippy_pty"),
             "klipper.dict": ASSETS.joinpath("klipper/klipper.dict"),
@@ -158,11 +164,14 @@ def path_args(request: pytest.FixtureRequest,
         session_args["pcfg_asset"] = pcfg_asset
         interpolate_config(pcfg_asset, pcfg_dest, session_args)
         pytestconfig.stash[need_klippy_restart] = True
-    if paths["secrets"] != session_args["secrets_path"].name:
+    if paths["secrets"] != session_args["secrets_asset_name"]:
+        # Secrets are always discovered at the fixed "moonraker.secrets"
+        # location under data_path, so only the source asset name (not
+        # the destination path) varies between test configurations.
         secrets_asset = ASSETS.joinpath(f"moonraker/{paths['secrets']}")
-        secrets_dest = tmp_path.joinpath(paths['secrets'])
+        secrets_dest = session_args["secrets_path"]
         shutil.copy(secrets_asset, secrets_dest)
-        session_args["secrets_path"] = secrets_dest
+        session_args["secrets_asset_name"] = paths["secrets"]
     if "moonraker_log" in paths:
         log_path = session_args["log_path"]
         session_args['moonraker.log'] = log_path.joinpath(
@@ -191,24 +200,54 @@ def path_args(request: pytest.FixtureRequest,
         # restore the original uds path
         interpolate_config(mconf_asset, mconf_dest, session_args)
 
-@pytest.fixture(scope="class")
-def base_server(path_args: Dict[str, pathlib.Path],
-                event_loop: asyncio.AbstractEventLoop
-                ) -> Iterator[Server]:
-    evtloop = EventLoop()
-    args = {
-        'config_file': str(path_args['moonraker.conf']),
+def build_app_args(
+    path_args: Dict[str, pathlib.Path],
+    startup_warnings: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    # Builds an app_args dict with every key any current Moonraker code
+    # path reads (see moonraker/server.py's main(), which builds the real
+    # app_args dict), so Server()/LogManager() work the same in tests as
+    # they do when launched for real.
+    if startup_warnings is None:
+        startup_warnings = []
+    temp_path = path_args['temp_path']
+    cfg_file = str(path_args['moonraker.conf'])
+    return {
+        'data_path': str(temp_path),
+        'is_default_data_path': False,
+        'config_file': cfg_file,
+        'backup_config': confighelper.find_config_backup(cfg_file),
+        'startup_warnings': startup_warnings,
+        'verbose': False,
+        'debug': False,
+        'asyncio_debug': False,
+        'is_backup_config': False,
+        'is_python_package': False,
+        'instance_uuid': uuid.uuid4().hex,
+        'unix_socket_path': str(temp_path.joinpath("moonraker.sock")),
+        'structured_logging': False,
         'log_file': str(path_args.get("moonraker.log", "")),
-        'software_version': "moonraker-pytest"
+        'software_version': "moonraker-pytest",
+        'python_version': sys.version.replace("\n", " "),
+        'launch_args': " ".join([sys.executable] + sys.argv).strip(),
+        'msgspec_enabled': False,
+        'uvloop_enabled': EventLoop.UVLOOP_ENABLED,
     }
-    ql = logger = None
-    if args["log_file"]:
-        ql, logger, warning = utils.setup_logging(args)
-        if warning:
-            args["log_warning"] = warning
-    yield Server(args, logger, evtloop)
-    if ql is not None:
-        ql.stop()
+
+@pytest_asyncio.fixture(scope="class")
+async def base_server(path_args: Dict[str, pathlib.Path],
+                      event_loop: asyncio.AbstractEventLoop
+                      ) -> AsyncIterator[Server]:
+    # EventLoop() requires a running asyncio loop at construction time
+    # (it calls asyncio.get_running_loop() internally), so this fixture
+    # must be an async fixture rather than a plain synchronous one.
+    evtloop = EventLoop()
+    startup_warnings: List[str] = []
+    args = build_app_args(path_args, startup_warnings)
+    log_manager = LogManager(args, startup_warnings)
+    server = Server(args, log_manager, evtloop)
+    yield server
+    log_manager.stop_logging()
 
 @pytest_asyncio.fixture(scope="class")
 async def full_server(base_server: Server) -> AsyncIterator[Server]:
@@ -221,10 +260,17 @@ async def full_server(base_server: Server) -> AsyncIterator[Server]:
 
 @pytest_asyncio.fixture(scope="class")
 async def ready_server(full_server: Server, klippy: KlippyProcess):
-    ret = full_server.start_server(connect_to_klippy=False)
-    await asyncio.wait_for(ret, 4.)
-    ret = full_server.klippy_connection.connect()
-    await asyncio.wait_for(ret, 4.)
+    # full_server is module/class-scoped and some tests (e.g.
+    # test_klippy_startup) call full_server.start_server()/connect()
+    # directly, so guard against starting/connecting a second time -
+    # MoonrakerApp.listen() has no such guard and would otherwise try (and
+    # fail) to bind the HTTP port again.
+    if not full_server.is_running():
+        ret = full_server.start_server(connect_to_klippy=False)
+        await asyncio.wait_for(ret, 4.)
+    if not full_server.klippy_connection.is_connected():
+        ret = full_server.klippy_connection.connect()
+        await asyncio.wait_for(ret, 4.)
     yield full_server
 
 @pytest_asyncio.fixture(scope="class")

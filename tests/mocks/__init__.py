@@ -1,10 +1,10 @@
 from __future__ import annotations
 import asyncio
-from utils import ServerError
-from .mock_gpio import MockGpiod
+from moonraker.utils import ServerError
+from .mock_gpio import MockPeripheryGPIO
 
 __all__ = ("MockReader", "MockWriter", "MockComponent", "MockWebsocket",
-           "MockGpiod")
+           "MockPeripheryGPIO")
 
 class MockWriter:
     def __init__(self, wait_drain: bool = False) -> None:
@@ -65,6 +65,11 @@ class MockComponent:
 class MockWebsocket:
     def __init__(self, fut: asyncio.Future) -> None:
         self.future = fut
+        # WebsocketManager.notify_clients() (moonraker/components/websockets.py)
+        # checks sc.uid/sc.need_auth on every registered client - see
+        # BaseRemoteConnection in moonraker/common.py for the real interface.
+        self.uid = id(self)
+        self.need_auth = False
 
     def queue_message(self, data: str):
         self.future.set_result(data)

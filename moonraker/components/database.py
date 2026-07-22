@@ -362,9 +362,18 @@ class MoonrakerDatabase:
             self.db_provider.insert_batch, namespace, records
         )
 
+    def _check_namespace(self, namespace: str) -> None:
+        if namespace not in self.db_provider.namespaces:
+            raise self.server.error(f"Namespace '{namespace}' not found", 404)
+
     def move_batch(
         self, namespace: str, source_keys: List[str], dest_keys: List[str]
     ) -> Future[None]:
+        self._check_namespace(namespace)
+        if len(source_keys) != len(dest_keys):
+            raise self.server.error(
+                "Source and destination key lists must be the same length"
+            )
         return self.db_provider.execute_db_function(
             self.db_provider.move_batch, namespace, source_keys, dest_keys
         )
@@ -372,6 +381,7 @@ class MoonrakerDatabase:
     def delete_batch(
         self, namespace: str, keys: List[str]
     ) -> Future[Dict[str, Any]]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.delete_batch, namespace, keys
         )
@@ -379,6 +389,7 @@ class MoonrakerDatabase:
     def get_batch(
         self, namespace: str, keys: List[str]
     ) -> Future[Dict[str, Any]]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.get_batch, namespace, keys
         )
@@ -388,11 +399,13 @@ class MoonrakerDatabase:
     def update_namespace(
         self, namespace: str, values: Dict[str, DBRecord]
     ) -> Future[None]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.insert_batch, namespace, values
         )
 
     def clear_namespace(self, namespace: str) -> Future[None]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.clear_namespace, namespace
         )
@@ -400,26 +413,33 @@ class MoonrakerDatabase:
     def sync_namespace(
         self, namespace: str, values: Dict[str, DBRecord]
     ) -> Future[None]:
+        self._check_namespace(namespace)
+        if not values:
+            raise self.server.error("Cannot sync an empty namespace")
         return self.db_provider.execute_db_function(
             self.db_provider.sync_namespace, namespace, values
         )
 
     def ns_length(self, namespace: str) -> Future[int]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.get_namespace_length, namespace
         )
 
     def ns_keys(self, namespace: str) -> Future[List[str]]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.get_namespace_keys, namespace,
         )
 
     def ns_values(self, namespace: str) -> Future[List[Any]]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.get_namespace_values, namespace
         )
 
     def ns_items(self, namespace: str) -> Future[List[Tuple[str, Any]]]:
+        self._check_namespace(namespace)
         return self.db_provider.execute_db_function(
             self.db_provider.get_namespace_items, namespace
         )
@@ -428,7 +448,7 @@ class MoonrakerDatabase:
         self, namespace: str, key: Union[List[str], str]
     ) -> Future[bool]:
         return self.db_provider.execute_db_function(
-            self.db_provider.namespace_contains, namespace
+            self.db_provider.namespace_contains, namespace, key
         )
 
     # SQL direct query methods
@@ -480,6 +500,10 @@ class MoonrakerDatabase:
     def register_local_namespace(
             self, namespace: str, forbidden: bool = False, parse_keys: bool = False
     ) -> NamespaceWrapper:
+        if self.db_provider.is_alive():
+            raise self.server.error(
+                "Namespace registration must occur during init."
+            )
         if namespace in self.registered_namespaces:
             raise self.server.error(f"Namespace '{namespace}' already registered")
         self.registered_namespaces.add(namespace)
@@ -501,6 +525,10 @@ class MoonrakerDatabase:
     def wrap_namespace(
         self, namespace: str, parse_keys: bool = True
     ) -> NamespaceWrapper:
+        if self.db_provider.is_alive():
+            raise self.server.error(
+                "Cannot wrap a namespace while the eventloop is running"
+            )
         if namespace not in self.db_provider.namespaces:
             raise self.server.error(f"Namespace '{namespace}' not found", 404)
         return NamespaceWrapper(namespace, self, parse_keys)
@@ -993,7 +1021,7 @@ class SqliteProvider(Thread):
     ) -> None:
         def generate_params():
             for key, val in values.items():
-                yield (namespace, key, val)
+                yield (namespace, key, encode_record(val))
         with conn:
             conn.execute(
                 f"DELETE FROM {NAMESPACE_TABLE} WHERE namespace = ?", (namespace,)
@@ -1035,7 +1063,7 @@ class SqliteProvider(Thread):
             (namespace,)
         )
         cur.arraysize = 200
-        return cur.fetchall()
+        return [(row[0], row[1]) for row in cur.fetchall()]
 
     def namespace_contains(
         self, conn: sqlite3.Connection, namespace: str, key: Union[List[str], str]
@@ -1046,7 +1074,7 @@ class SqliteProvider(Thread):
                 cur = conn.execute(
                     f"SELECT key FROM {NAMESPACE_TABLE} "
                     "WHERE namespace = ? and key = ?",
-                    (namespace, key)
+                    (namespace, key_list[0])
                 )
                 return cur.fetchone() is not None
             record = self._get_record(conn, namespace, key_list[0])

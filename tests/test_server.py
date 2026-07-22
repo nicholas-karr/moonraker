@@ -3,16 +3,18 @@ import pytest
 import pytest_asyncio
 import asyncio
 import socket
+import sys
 import pathlib
-from collections import namedtuple
 
 from moonraker.server import CORE_COMPONENTS, Server, API_VERSION
 from moonraker.server import main as servermain
 from moonraker.eventloop import EventLoop
+from moonraker.loghelper import LogManager
 from moonraker.utils import ServerError
 from moonraker.confighelper import ConfigError
 from moonraker.components.klippy_apis import KlippyAPI
 from mocks import MockComponent, MockWebsocket
+from conftest import build_app_args
 
 from typing import (
     TYPE_CHECKING,
@@ -24,31 +26,29 @@ from typing import (
 if TYPE_CHECKING:
     from fixtures import HttpClient, WebsocketClient
 
-MockArgs = namedtuple('MockArgs', ["logfile", "nologfile", "configfile"])
-
 @pytest.mark.run_paths(moonraker_conf="invalid_config.conf")
-def test_invalid_config(path_args: Dict[str, pathlib.Path]):
+@pytest.mark.asyncio
+async def test_invalid_config(path_args: Dict[str, pathlib.Path]):
+    # EventLoop() requires a running asyncio loop at construction time
+    # (it calls asyncio.get_running_loop() internally).
     evtloop = EventLoop()
-    args = {
-        'config_file': str(path_args['moonraker.conf']),
-        'log_file': "",
-        'software_version': "moonraker-pytest"
-    }
+    args = build_app_args(path_args)
     with pytest.raises(ConfigError):
         Server(args, None, evtloop)
 
-def test_config_and_log_warnings(path_args: Dict[str, pathlib.Path]):
+@pytest.mark.asyncio
+async def test_config_and_log_warnings(path_args: Dict[str, pathlib.Path]):
+    # Unlike test_invalid_config, this config parses successfully, so
+    # Server.__init__() proceeds past _parse_config() and into
+    # add_log_rollover_item(), which needs a real LogManager (None is only
+    # safe when a ConfigError aborts __init__() before that point).
     evtloop = EventLoop()
-    args = {
-        'config_file': str(path_args['moonraker.conf']),
-        'log_file': "",
-        'software_version': "moonraker-pytest",
-        'log_warning': "Log Warning Test",
-        'config_warning': "Config Warning Test"
-    }
     expected = ["Log Warning Test", "Config Warning Test"]
-    server = Server(args, None, evtloop)
-    assert server.warnings == expected
+    startup_warnings = list(expected)
+    args = build_app_args(path_args, startup_warnings=startup_warnings)
+    log_manager = LogManager(args, startup_warnings)
+    server = Server(args, log_manager, evtloop)
+    assert server.get_warnings() == expected
 
 @pytest.mark.run_paths(moonraker_conf="unparsed_server.conf")
 @pytest.mark.asyncio
@@ -58,7 +58,7 @@ async def test_unparsed_config_items(full_server: Server):
         "Unparsed config option 'unknown_option: True' detected "
         "in section [server]."]
     warn_cnt = 0
-    for warn in full_server.warnings:
+    for warn in full_server.get_warnings():
         for expected in expected_warnings:
             if warn.startswith(expected):
                 warn_cnt += 1
@@ -73,8 +73,13 @@ async def test_file_logger(base_server: Server,
 
 def test_signal_handler(base_server: Server,
                         event_loop: asyncio.AbstractEventLoop):
+    # Nothing calls event_loop.stop(), so a plain run_forever() would hang
+    # forever; run_until_exit() resolves once _stop_server() (scheduled by
+    # _handle_term_signal()) sets app_running_evt, giving the loop a
+    # natural stopping point (mirrors how launch_server() drives Server in
+    # moonraker/server.py's main()).
     base_server._handle_term_signal()
-    event_loop.run_forever()
+    event_loop.run_until_complete(base_server.run_until_exit())
     assert base_server.exit_reason == "terminate"
 
 class TestInstantiation:
@@ -84,12 +89,14 @@ class TestInstantiation:
     def test_app_args(self,
                       path_args: Dict[str, pathlib.Path],
                       base_server: Server):
-        args = {
-            'config_file': str(path_args['moonraker.conf']),
-            'log_file': str(path_args.get("moonlog", "")),
-            'software_version': "moonraker-pytest"
-        }
-        assert base_server.get_app_args() == args
+        # get_app_args() returns the full app_args dict (data_path,
+        # instance_uuid, launch_args, etc - see build_app_args() in
+        # conftest.py), so only the values sourced from path_args/this
+        # fixture are checked here rather than the whole dict.
+        app_args = base_server.get_app_args()
+        assert app_args['config_file'] == str(path_args['moonraker.conf'])
+        assert app_args['log_file'] == str(path_args.get("moonraker.log", ""))
+        assert app_args['software_version'] == "moonraker-pytest"
 
     def test_api_version(self, base_server: Server):
         ver = base_server.get_api_version()
@@ -103,7 +110,7 @@ class TestInstantiation:
         assert base_server.get_klippy_info() == {}
 
     def test_klippy_state(self, base_server: Server):
-        assert base_server.get_klippy_state() == "disconnected"
+        assert str(base_server.klippy_connection.state) == "disconnected"
 
     def test_host_info(self, base_server: Server):
         hinfo = {
@@ -118,36 +125,51 @@ class TestInstantiation:
         assert base_server.klippy_connection.is_connected() is False
 
     def test_components(self, base_server: Server):
+        # "secrets" and "template" are loaded as a side effect of parsing
+        # the config (see confighelper.py's gettemplate(), which lazily
+        # loads the "template" component - itself dependent on "secrets" -
+        # the first time any option value needs template substitution).
         key_list = sorted(list(base_server.components.keys()))
         assert key_list == [
             "application",
             "internal_transport",
+            "jsonrpc",
             "klippy_connection",
+            "secrets",
+            "template",
             "websockets",
         ]
 
     def test_endpoint_registered(self, base_server: Server):
         app = base_server.moonraker_app
-        assert "/server/info" in app.api_cache
+        assert "/server/info" in app.registered_base_handlers
 
     @pytest.mark.asyncio
     async def test_notification(self, base_server: Server):
         base_server.register_notification("test:test_event")
         fut = base_server.event_loop.create_future()
         wsm = base_server.lookup_component("websockets")
-        wsm.websockets[1] = MockWebsocket(fut)
+        wsm.clients[1] = MockWebsocket(fut)
         base_server.send_event("test:test_event", "test")
         ret = await fut
+        # notify_clients() (moonraker/components/websockets.py) assigns the
+        # raw *args tuple straight to msg['params'] - it stays a tuple here
+        # because this test captures the in-memory message via MockWebsocket
+        # rather than round-tripping it through real JSON serialization
+        # (which would turn it into a list on the wire).
         expected = {
             'jsonrpc': "2.0",
             'method': "notify_test_event",
-            'params': ["test"]
+            'params': ("test",)
         }
         assert expected == ret
 
 class TestLoadComponent:
     def test_load_component_fail(self, base_server: Server):
-        with pytest.raises(ServerError):
+        # load_component() re-raises whatever exception importing the
+        # component module produced (see the bare `raise` in its except
+        # block) rather than wrapping it in a ServerError.
+        with pytest.raises(ModuleNotFoundError):
             base_server.load_component(
                 base_server.config, "invalid_component")
 
@@ -155,8 +177,13 @@ class TestLoadComponent:
         assert "invalid_component" in base_server.failed_components
 
     def test_load_component_fail_with_default(self, base_server: Server):
+        # Once a component name is in failed_components, load_component()
+        # always raises ServerError rather than falling back to `default`
+        # (see its "previously failed to load" check), so the
+        # default-swallowing path only applies to a component that hasn't
+        # already failed.
         comp = base_server.load_component(
-            base_server.config, "invalid_component", None)
+            base_server.config, "another_invalid_component", None)
         assert comp is None
 
     def test_lookup_failed(self, base_server: Server):
@@ -180,8 +207,11 @@ class TestLoadComponent:
         assert key_list == [
             "application",
             "internal_transport",
+            "jsonrpc",
             "klippy_apis",
             "klippy_connection",
+            "secrets",
+            "template",
             "websockets",
         ]
 
@@ -296,6 +326,9 @@ class TestSecureServerStart:
 
 @pytest.mark.asyncio
 async def test_component_init_error(base_server: Server):
+    # server_init() unconditionally looks up "file_manager" to start its
+    # file observer, so the core/optional components must be loaded first.
+    base_server.load_components()
     base_server.register_component("testcomp", MockComponent(err_init=True))
     await base_server.server_init(False)
     assert "testcomp" in base_server.failed_components
@@ -359,64 +392,90 @@ async def test_register_remote_method_running(full_server: Server):
         full_server.register_remote_method(
             "moonraker_test", lambda: None)
 
+def _set_main_argv(monkeypatch: pytest.MonkeyPatch,
+                   path_args: Dict[str, pathlib.Path]) -> None:
+    # main() parses real argv via argparse (it no longer accepts an
+    # injected args namespace), so tests drive it through sys.argv.
+    # -d pins data_path to the test's tmp dir (the default "~/printer_data"
+    # would otherwise touch the real home directory), -n disables the
+    # file logger, and -c points at the config under test.
+    cfg_path = path_args["moonraker.conf"]
+    monkeypatch.setattr(sys, "argv", [
+        "moonraker",
+        "-d", str(path_args["temp_path"]),
+        "-c", str(cfg_path),
+        "-n",
+    ])
+
 @pytest.mark.usefixtures("event_loop")
 def test_main(path_args: Dict[str, pathlib.Path],
               monkeypatch: pytest.MonkeyPatch,
-              caplog: pytest.LogCaptureFixture):
+              capsys: pytest.CaptureFixture):
+    # main() constructs its own LogManager, which unconditionally strips
+    # every existing handler off the root logger (see LogManager.__init__
+    # in moonraker/loghelper.py) - including pytest's caplog handler - and
+    # replaces it with a queue listener that writes formatted records to
+    # stdout. So anything logged after that point (which is everything
+    # this test cares about) only shows up in captured stdout, not caplog.
     tries = [1]
 
-    def mock_init(self: Server):
+    async def mock_init(self: Server):
         reason = "terminate"
         if tries:
             reason = "restart"
             tries.pop(0)
         self.event_loop.delay_callback(.01, self._stop_server, reason)
-    cfg_path = path_args["moonraker.conf"]
-    args = MockArgs("", True, str(cfg_path))
+    _set_main_argv(monkeypatch, path_args)
     monkeypatch.setattr(Server, "server_init", mock_init)
     code: Optional[int] = None
     try:
-        servermain(args)
+        servermain()
     except SystemExit as e:
         code = e.code
+    out = capsys.readouterr().out
     assert (
         code == 0 and
-        "Attempting Server Restart..." in caplog.messages and
-        "Server Shutdown" == caplog.messages[-1]
+        "Attempting Server Restart..." in out and
+        out.strip().splitlines()[-1].endswith("Server Shutdown")
     )
 
 @pytest.mark.run_paths(moonraker_conf="invalid_config.conf")
 def test_main_config_error(path_args: Dict[str, pathlib.Path],
-                           caplog: pytest.LogCaptureFixture):
-    cfg_path = path_args["moonraker.conf"]
-    args = MockArgs("", True, str(cfg_path))
+                           monkeypatch: pytest.MonkeyPatch,
+                           capsys: pytest.CaptureFixture):
+    _set_main_argv(monkeypatch, path_args)
     try:
-        servermain(args)
+        servermain()
     except SystemExit as e:
         code = e.code
-    assert code == 1 and "Server Config Error" in caplog.messages
+    out = capsys.readouterr().out
+    assert code == 1 and "Server Config Error" in out
 
 @pytest.mark.run_paths(moonraker_conf="invalid_config.conf",
                        moonraker_bkp=".moonraker.conf.bkp")
 @pytest.mark.usefixtures("event_loop")
 def test_main_restore_config(path_args: Dict[str, pathlib.Path],
                              monkeypatch: pytest.MonkeyPatch,
-                             caplog: pytest.LogCaptureFixture):
-    def mock_init(self: Server):
+                             capsys: pytest.CaptureFixture):
+    async def mock_init(self: Server):
         reason = "terminate"
         self.event_loop.delay_callback(.01, self._stop_server, reason)
 
-    cfg_path = path_args["moonraker.conf"]
-    args = MockArgs("", True, str(cfg_path))
+    _set_main_argv(monkeypatch, path_args)
     monkeypatch.setattr(Server, "server_init", mock_init)
     code: Optional[int] = None
     try:
-        servermain(args)
+        servermain()
     except SystemExit as e:
         code = e.code
+    # launch_server() logs the config error, then on a successful retry
+    # against the backup config appends this warning describing the
+    # fallback (see the ConfigError branch in moonraker/server.py's
+    # launch_server()).
+    out = capsys.readouterr().out
     assert (
         code == 0 and
-        "Loaded server from most recent working configuration:" in caplog.text
+        "Loading most recent working configuration:" in out
     )
 
 class TestEndpoints:
@@ -436,7 +495,7 @@ class TestEndpoints:
             'klippy_state': "disconnected",
             'components': comps,
             'failed_components': [],
-            'registered_directories': ["config", "logs"],
+            'registered_directories': ["config", "logs", "gcodes"],
             'warnings': [],
             'websocket_count': 0,
             'moonraker_version': "moonraker-pytest",
@@ -465,7 +524,7 @@ class TestEndpoints:
             'klippy_state': "disconnected",
             'components': comps,
             'failed_components': [],
-            'registered_directories': ["config", "logs"],
+            'registered_directories': ["config", "logs", "gcodes"],
             'warnings': [],
             'websocket_count': 1,
             'moonraker_version': "moonraker-pytest",
@@ -494,7 +553,7 @@ def test_server_restart(base_server: Server,
         ret = await http_client.post("/server/restart")
         result.update(ret)
     event_loop.create_task(do_restart())
-    event_loop.run_forever()
+    event_loop.run_until_complete(base_server.run_until_exit())
     assert result["result"] == "ok" and base_server.exit_reason == "restart"
 
 @pytest.mark.no_ws_connect
@@ -510,7 +569,7 @@ def test_websocket_restart(base_server: Server,
         ret = await websocket_client.request("server.restart")
         result["result"] = ret
     event_loop.create_task(do_restart())
-    event_loop.run_forever()
+    event_loop.run_until_complete(base_server.run_until_exit())
     assert result["result"] == "ok" and base_server.exit_reason == "restart"
 
 
