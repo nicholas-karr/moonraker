@@ -110,10 +110,16 @@ def session_args(ssl_certs: Dict[str, pathlib.Path]
 def klippy_session(session_args: Dict[str, pathlib.Path],
                    pytestconfig: pytest.Config) -> Iterator[KlippyProcess]:
     pytestconfig.stash[need_klippy_restart] = False
-    kpath = pytestconfig.getoption('klipper_path', "~/klipper")
+    # The option is registered with a None default, so getoption's fallback
+    # argument is not used.  Preserve the advertised ~/klipper default when
+    # the caller does not pass --klipper-path.
+    kpath = pytestconfig.getoption('klipper_path') or "~/klipper"
     kexec = pytestconfig.getoption('klipper_exec', None)
     if kexec is None:
-        kexec = sys.executable
+        # A normal Klipper install has its runtime dependencies in klippy-env,
+        # while Moonraker's test interpreter generally does not include cffi.
+        klippy_exec = pathlib.Path("~/klippy-env/bin/python").expanduser()
+        kexec = klippy_exec if klippy_exec.is_file() else sys.executable
     exec = pathlib.Path(kexec).expanduser()
     klipper_path = pathlib.Path(kpath).expanduser()
     base_cmd = f"{exec} {klipper_path}/klippy/klippy.py "

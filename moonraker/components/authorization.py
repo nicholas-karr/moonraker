@@ -135,11 +135,6 @@ class Authorization:
         self.server = config.get_server()
         self.login_timeout = config.getint('login_timeout', 90)
         self.force_logins = config.getboolean('force_logins', False)
-        # Not read from [authorization] in moonraker.conf - like force_logins
-        # above, [simple_password_auth] is the only intended on/off switch
-        # for these two and sets them directly on this instance, so there's
-        # no separate config option here for them to drift out of sync with.
-        self.sessions_never_expire = False
         self.force_login_bypass_trusted = False
         self.default_source = config.get('default_source', "moonraker").lower()
         self.enable_api_key = config.getboolean('enable_api_key', True)
@@ -668,8 +663,6 @@ class Authorization:
     def decode_jwt(
         self, token: str, token_type: str = "access", check_exp: bool = True
     ) -> UserInfo:
-        if self.sessions_never_expire:
-            check_exp = False
         message, sig = token.rsplit('.', maxsplit=1)
         enc_header, enc_payload = message.split('.')
         header: Dict[str, Any] = jsonw.loads(base64url_decode(enc_header))

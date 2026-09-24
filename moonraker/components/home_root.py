@@ -11,17 +11,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..confighelper import ConfigHelper
 
-# Mainsail's Configure page recursively enumerates every registered root to
-# build its file tree - one server.files.get_directory call per directory,
-# every time the page loads. For a root as broad as $HOME that's ruinous
-# (observed directly: 11,000+ calls in 11 seconds, each one running
-# file_manager's directory listing synchronously on Moonraker's event loop,
-# long enough to trip its "EVENT LOOP BLOCKED" watchdog and drop Mainsail's
-# websocket connection). Fixed client-side instead of here - see
-# biokalico_extras/mainsail/home-root-throttle.js - since the fix needs to
-# generalize to whatever ends up under $HOME, not just what's there today,
-# and a rate limit on the request source is more robust than trying to
-# enumerate "big" directories by name on the server.
+# Listing all of $HOME at once blocks Moonraker long enough to drop
+# Mainsail's connection. Mainsail only loads the roots in
+# eagerlyExpandedRoots (deps/mainsail/src/store/variables.ts) up front and
+# loads this one a directory at a time as the user browses.
 
 
 class HomeRoot:

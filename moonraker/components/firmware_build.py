@@ -6,7 +6,8 @@
 #
 # Drives scripts/firmware/build_and_flash.py (in the klipper repo) to build
 # and flash [firmware_build <name>] targets declared in printer.cfg. Exposes
-# REST endpoints consumed by biokalico_extras/mainsail/firmware-panel.js.
+# REST endpoints consumed by the Firmware panel in deps/mainsail
+# (src/components/panels/Machine/FirmwarePanel.vue).
 #
 # There is deliberately no "flash only" endpoint - build_and_flash is the
 # only action that ever writes firmware, so a stale binary can't be flashed
@@ -23,10 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..common import RequestType
@@ -71,9 +75,11 @@ class FirmwareBuildComponent:
         self.job_status: Dict[str, Dict[str, Any]] = {}
         self.job_error: Optional[str] = None
         self.current_cmd: Optional[ShellCommand] = None
-        # Guards the second _check_not_printing() call (see _handle_output)
-        # so it only fires once per job, right as the flash phase begins.
-        self.job_flash_check_done = False
+        # Directory holding the approval file for the current
+        # build_and_flash job. Created 0700 so other local users cannot
+        # write "ok" into it, and removed with the job.
+        self.flash_approval_dir: Optional[str] = None
+        self.flash_approval_file: Optional[str] = None
 
         self.server.register_endpoint(
             "/server/firmware/targets", RequestType.GET, self._handle_targets
@@ -93,7 +99,6 @@ class FirmwareBuildComponent:
             "/server/firmware/cancel", RequestType.POST, self._handle_cancel
         )
 
-    # ---- printer.cfg reading ---------------------------------------------
     # Reuses build_and_flash.py's own parser rather than duplicating it -
     # both need to agree on exactly which targets/devices exist.
 
@@ -203,8 +208,6 @@ class FirmwareBuildComponent:
         }
         return targets, current_describe, last_flashed, current_fingerprint
 
-    # ---- request handlers --------------------------------------------------
-
     async def _handle_targets(self, web_request: WebRequest) -> Dict[str, Any]:
         eventloop = self.server.get_event_loop()
         targets, current_describe, last_flashed_map, current_fingerprint_map = (
@@ -293,7 +296,11 @@ class FirmwareBuildComponent:
     def _check_not_printing(self) -> None:
         job_state = self.server.lookup_component("job_state", None)
         if job_state is None:
-            return
+            # Without job_state we can't tell whether a print is running.
+            raise self.server.error(
+                "Refusing to flash: print-state check (job_state "
+                "component) is unavailable"
+            )
         state = getattr(job_state, "last_print_stats", {}).get("state")
         if state in ("printing", "paused"):
             raise self.server.error(
@@ -328,7 +335,17 @@ class FirmwareBuildComponent:
             self.job_targets = names
             self.job_error = None
             self.job_status = {n: {"phase": "queued", "log": []} for n in names}
-            self.job_flash_check_done = False
+            approval_arg = ""
+            if action == "build_and_flash":
+                self.flash_approval_dir = tempfile.mkdtemp(
+                    prefix="biokalico-flash-approval-"
+                )
+                self.flash_approval_file = os.path.join(
+                    self.flash_approval_dir, "decision"
+                )
+                approval_arg = " --flash-approval-file %s" % shlex.quote(
+                    self.flash_approval_file
+                )
 
             shell_cmd: ShellCommandFactory = self.server.lookup_component(
                 "shell_command"
@@ -339,12 +356,13 @@ class FirmwareBuildComponent:
             # quote character would otherwise either misparse or raise
             # inside build_shell_command, which (without this try/finally)
             # would leak job_lock held forever.
-            cmd = "%s %s --action %s --printer-cfg %s --targets %s" % (
+            cmd = "%s %s --action %s --printer-cfg %s --targets %s%s" % (
                 shlex.quote(sys.executable),
                 shlex.quote(self.driver),
                 action,
                 shlex.quote(self.printer_cfg),
                 ",".join(shlex.quote(n) for n in names),
+                approval_arg,
             )
             scmd = shell_cmd.build_shell_command(
                 cmd, callback=self._handle_output, cwd=self.klipper_repo
@@ -353,6 +371,7 @@ class FirmwareBuildComponent:
         except BaseException:
             self.job_active = False
             self.current_cmd = None
+            self._cleanup_flash_approval()
             if self.job_lock.locked():
                 self.job_lock.release()
             raise
@@ -367,6 +386,7 @@ class FirmwareBuildComponent:
             finally:
                 self.job_active = False
                 self.current_cmd = None
+                self._cleanup_flash_approval()
                 if self.job_lock.locked():
                     self.job_lock.release()
 
@@ -388,29 +408,35 @@ class FirmwareBuildComponent:
             del entry["log"][:-MAX_LOG_LINES]
         if phase == "error" and self.job_error is None:
             self.job_error = "%s: %s" % (target, text)
-        # Second not-printing check (see _check_not_printing / _start_job):
-        # the job-submission-time check only catches a print already
-        # running before this (potentially multi-minute) build started - it
-        # can't see one started via a different Mainsail tab/API call while
-        # the build was in flight. The driver's own progress stream is the
-        # only signal this component has for "the flash phase is starting
-        # now" (build_and_flash.py flashes sequentially, only after every
-        # target has finished building - see build_and_flash.py's main()),
-        # so fire once, right as the first "flashing" phase line for this
-        # job comes in, and abort before the driver stops the klipper
-        # service if a print has started in the meantime.
-        if (
-            phase == "flashing"
-            and self.job_action == "build_and_flash"
-            and not self.job_flash_check_done
-        ):
-            self.job_flash_check_done = True
+        # The driver waits at "flash_check" until this writes a decision, so
+        # it can't stop Klipper before the print check runs.
+        if phase == "flash_check" and self.flash_approval_file is not None:
             try:
                 self._check_not_printing()
+                decision = "ok"
             except Exception as e:
-                self.server.get_event_loop().create_task(
-                    self._abort_flash_for_active_print(str(e))
-                )
+                decision = "abort: %s" % e
+                self.job_error = decision
+            self._write_flash_decision(self.flash_approval_file, decision)
+
+    def _write_flash_decision(self, path: str, decision: str) -> None:
+        # Rename into place so the driver never reads a partial file. If this
+        # fails, the driver times out and doesn't flash.
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                f.write(decision)
+            os.replace(tmp_path, path)
+        except OSError:
+            logging.exception("Unable to write firmware flash approval")
+            self.job_error = "unable to record flash approval decision"
+
+    def _cleanup_flash_approval(self) -> None:
+        approval_dir = self.flash_approval_dir
+        self.flash_approval_dir = None
+        self.flash_approval_file = None
+        if approval_dir is not None:
+            shutil.rmtree(approval_dir, ignore_errors=True)
 
     async def _handle_status(self, web_request: WebRequest) -> Dict[str, Any]:
         return {
@@ -429,17 +455,6 @@ class FirmwareBuildComponent:
         # unresponsive.
         await self.current_cmd.cancel(sig_idx=self.current_cmd.IDX_SIGTERM)
         return {"cancelled": True}
-
-    async def _abort_flash_for_active_print(self, reason: str) -> None:
-        # Called from _handle_output (a sync callback) via create_task,
-        # since cancelling the driver process is async. Same SIGTERM path
-        # as _handle_cancel - build_and_flash.py's signal handler still
-        # restarts klipper in flash_target()'s finally block either way, so
-        # this never leaves the service down.
-        if self.current_cmd is None:
-            return
-        self.job_error = "aborting build_and_flash job: %s" % reason
-        await self.current_cmd.cancel(sig_idx=self.current_cmd.IDX_SIGTERM)
 
 
 def load_component(config: ConfigHelper) -> FirmwareBuildComponent:

@@ -332,6 +332,10 @@ async def test_component_init_error(base_server: Server):
     base_server.register_component("testcomp", MockComponent(err_init=True))
     await base_server.server_init(False)
     assert "testcomp" in base_server.failed_components
+    # server_init starts the database provider's command thread.  This
+    # function-scoped server must be stopped here instead of relying on a
+    # later test's independent fixture instance to clean it up.
+    await base_server._stop_server("terminate")
 
 @pytest.mark.asyncio
 async def test_component_exit_error(base_server: Server,

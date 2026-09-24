@@ -33,7 +33,7 @@ def open_db(db_path: str) -> lmdb.Environment:
                      max_dbs=MAX_NAMESPACES)
 
 def _do_dump(namespace: bytes,
-             db: object,
+             db: lmdb._Database,
              backup: TextIO,
              txn: lmdb.Transaction
              ) -> None:
@@ -177,7 +177,7 @@ def restore(args: Dict[str, Any]):
     namespace_count = 0
     keys_left = 0
     namespace = b""
-    current_db = object()
+    current_db: Optional[lmdb._Database] = None
     with env.begin(write=True) as txn:
         # clear all existing entries
         dbs = []
@@ -203,6 +203,8 @@ def restore(args: Dict[str, Any]):
                     current_db = env.open_db(namespace, txn=txn)
                     namespace_count += 1
                     continue
+                if current_db is None:
+                    raise DBToolError("Record found before namespace header")
                 txn.put(key, val, db=current_db)
                 keys_left -= 1
     if expected_ns_count != namespace_count:

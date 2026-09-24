@@ -43,7 +43,7 @@ class TestSimplePasswordAuth:
         ).hex()
         assert user.password == expected_hash
 
-    async def test_decode_jwt_ignores_expiry(self, full_server: Server):
+    async def test_decode_jwt_enforces_expiry(self, full_server: Server):
         auth: Authorization = full_server.lookup_component("authorization")
         user = auth.users[USERNAME]
         # Force this user's jwt_secret/jwk_id to exist so a token can be
@@ -66,20 +66,29 @@ class TestSimplePasswordAuth:
             exp_time=datetime.timedelta(seconds=-3600)
         )
 
-        # Without the patch, decode_jwt(check_exp=True) would raise "JWT
-        # Expired" here - the whole point of this component is that it
-        # never does, for any user, since login-gate.js has no
-        # refresh-token flow to fall back on.
-        decoded = auth.decode_jwt(expired_token)
-        assert decoded.username == USERNAME
+        with pytest.raises(auth.server.error, match="JWT Expired"):
+            auth.decode_jwt(expired_token)
 
+    async def test_local_bypass_is_disabled_by_default(
+        self, full_server: Server
+    ):
+        auth: Authorization = full_server.lookup_component("authorization")
+        # Even a trusted loopback peer must authenticate unless an operator
+        # explicitly opts into local_bypass.
+        with pytest.raises(HTTPError):
+            await auth.authenticate_request(FakeRequest("127.0.0.1"))
+
+
+@pytest.mark.run_paths(moonraker_conf="biokalico_components_local_bypass.conf")
+@pytest.mark.asyncio
+class TestSimplePasswordAuthLocalBypass:
     async def test_local_bypass_allows_trusted_ip_without_login(
         self, full_server: Server
     ):
         auth: Authorization = full_server.lookup_component("authorization")
-        # 127.0.0.1 is in base_server.conf's [authorization] trusted_clients
-        # and carries no Cloudflare headers - local_bypass (default True in
-        # biokalico_components.conf) should grant access with no token.
+        # 127.0.0.1 is in [authorization] trusted_clients and carries no
+        # Cloudflare headers, so the opt-in local_bypass grants access with
+        # no token.
         user = await auth.authenticate_request(FakeRequest("127.0.0.1"))
         assert user is not None
 

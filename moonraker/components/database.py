@@ -148,7 +148,7 @@ def generate_lmdb_entries(
             return
         else:
             break
-    lmdb_namespaces: List[Tuple[str, object]] = []
+    lmdb_namespaces: List[Tuple[str, lmdb._Database]] = []
     with lmdb_env.begin(buffers=True) as txn:
         # lookup existing namespaces
         with txn.cursor() as cursor:

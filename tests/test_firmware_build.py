@@ -100,3 +100,108 @@ class TestVersionMatches:
         assert not FirmwareBuildComponent._version_matches(
             "?-20260101_120000-myhost", "v1.2.3-4-abcdef"
         )
+
+
+def test_flash_check_writes_abort_before_driver_can_continue(tmp_path):
+    component = FirmwareBuildComponent.__new__(FirmwareBuildComponent)
+    approval = tmp_path / "approval"
+    component.flash_approval_file = str(approval)
+    component.job_status = {}
+    component.job_error = None
+
+    def reject_active_print():
+        raise RuntimeError("print is active")
+
+    component._check_not_printing = reject_active_print
+    component._handle_output(
+        b'{"target":"main","phase":"flash_check","line":"waiting"}'
+    )
+
+    assert approval.read_text() == "abort: print is active"
+    assert component.job_error == "abort: print is active"
+
+
+class _FakeServer:
+    """Minimal stand-in for Server.lookup_component/error used to test
+    _check_not_printing() without spinning up a full Server."""
+
+    def __init__(self, job_state: Any = None) -> None:
+        self._job_state = job_state
+
+    def lookup_component(self, name: str, default: Any = None) -> Any:
+        if name == "job_state":
+            return self._job_state
+        return default
+
+    def error(self, msg: str) -> ServerError:
+        return ServerError(msg)
+
+
+def test_check_not_printing_fails_closed_when_job_state_unavailable():
+    # Without job_state the print state is unknown, so refuse to flash.
+    component = FirmwareBuildComponent.__new__(FirmwareBuildComponent)
+    component.server = _FakeServer(job_state=None)
+
+    with pytest.raises(ServerError):
+        component._check_not_printing()
+
+
+def test_check_not_printing_permits_when_job_state_idle():
+    class _JobState:
+        last_print_stats = {"state": "standby"}
+
+    component = FirmwareBuildComponent.__new__(FirmwareBuildComponent)
+    component.server = _FakeServer(job_state=_JobState())
+
+    # Should not raise.
+    component._check_not_printing()
+
+
+def test_check_not_printing_blocks_when_printing():
+    class _JobState:
+        last_print_stats = {"state": "printing"}
+
+    component = FirmwareBuildComponent.__new__(FirmwareBuildComponent)
+    component.server = _FakeServer(job_state=_JobState())
+
+    with pytest.raises(ServerError):
+        component._check_not_printing()
+
+
+def test_flash_decision_is_written_atomically(tmp_path):
+    component = FirmwareBuildComponent.__new__(FirmwareBuildComponent)
+    component.job_error = None
+    approval = tmp_path / "decision"
+
+    component._write_flash_decision(str(approval), "ok")
+
+    assert approval.read_text() == "ok"
+    # The temporary name is renamed away, so the driver never sees it.
+    assert [p.name for p in tmp_path.iterdir()] == ["decision"]
+    assert component.job_error is None
+
+
+def test_flash_decision_write_failure_is_recorded_not_raised(tmp_path):
+    component = FirmwareBuildComponent.__new__(FirmwareBuildComponent)
+    component.job_error = None
+
+    component._write_flash_decision(str(tmp_path / "missing" / "decision"), "ok")
+
+    assert component.job_error == "unable to record flash approval decision"
+
+
+def test_flash_approval_cleanup_removes_the_private_directory(tmp_path):
+    component = FirmwareBuildComponent.__new__(FirmwareBuildComponent)
+    approval_dir = tmp_path / "approval"
+    approval_dir.mkdir()
+    (approval_dir / "decision").write_text("ok")
+    component.flash_approval_dir = str(approval_dir)
+    component.flash_approval_file = str(approval_dir / "decision")
+
+    component._cleanup_flash_approval()
+
+    assert not approval_dir.exists()
+    assert component.flash_approval_dir is None
+    assert component.flash_approval_file is None
+    # Cleaning up twice, as the error and finally paths both do, is harmless.
+    component._cleanup_flash_approval()

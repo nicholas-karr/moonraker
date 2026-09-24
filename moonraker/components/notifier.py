@@ -32,7 +32,9 @@ if TYPE_CHECKING:
 # System health events, distinct from JobEvent: some are raised elsewhere
 # in Moonraker today (klippy_shutdown/klippy_disconnect/cpu_throttled) but
 # never reach a notifier; disk_low/disk_recovered/cpu_temp_high/
-# cpu_temp_normal are raised by the health_monitor component.
+# cpu_temp_normal are raised by the health_monitor component;
+# auto_recovery_action is raised by the auto_recovery component whenever it
+# attempts, gives up on, or confirms an automatic fix.
 SYSTEM_EVENTS = [
     "klippy_shutdown",
     "klippy_disconnect",
@@ -41,12 +43,14 @@ SYSTEM_EVENTS = [
     "disk_recovered",
     "cpu_temp_high",
     "cpu_temp_normal",
+    "auto_recovery_action",
 ]
 
 class Notifier:
     def __init__(self, config: ConfigHelper) -> None:
         self.server = config.get_server()
         self.event_loop = self.server.get_event_loop()
+        self.disconnect_generation = 0
         self.notifiers: Dict[str, NotifierInstance] = {}
         self.events: Dict[str, List[NotifierInstance]] = {}
         prefix_sections = config.get_prefix_sections("notifier")
@@ -85,7 +89,8 @@ class Notifier:
             "proc_stats:cpu_throttled", self._on_cpu_throttled
         )
         for evt_name in (
-            "disk_low", "disk_recovered", "cpu_temp_high", "cpu_temp_normal"
+            "disk_low", "disk_recovered", "cpu_temp_high", "cpu_temp_normal",
+            "auto_recovery_action",
         ):
             self.server.register_event_handler(
                 evt_name, functools.partial(self._dispatch_system_event, evt_name)
@@ -123,20 +128,24 @@ class Notifier:
         if evt_name != "klippy_disconnect":
             await self._dispatch_system_event(evt_name, kconn.state_message)
             return
+        self.disconnect_generation += 1
+        generation = self.disconnect_generation
         message = kconn.state_message
         for notifier in self.events.get(evt_name, []):
             if notifier.min_disconnect_duration <= 0.:
                 await notifier.notify(evt_name, [], message)
             else:
                 self.event_loop.create_task(
-                    self._notify_after_disconnect(notifier, kconn, message)
+                    self._notify_after_disconnect(
+                        notifier, kconn, message, generation)
                 )
 
     async def _notify_after_disconnect(
         self,
         notifier: NotifierInstance,
         kconn: KlippyConnection,
-        message: str
+        message: str,
+        generation: int
     ) -> None:
         # Routine restarts (RESTART/FIRMWARE_RESTART, a Klipper service
         # bounce, etc.) briefly disconnect Klippy before it reconnects on
@@ -144,7 +153,10 @@ class Notifier:
         # notify if Klippy is still disconnected once it elapses, so those
         # routine restarts don't page anyone.
         await asyncio.sleep(notifier.min_disconnect_duration)
-        if not kconn.is_connected():
+        if (
+            generation == self.disconnect_generation
+            and not kconn.is_connected()
+        ):
             await notifier.notify("klippy_disconnect", [], message)
 
     async def _on_cpu_throttled(self, throttled_state: Dict[str, Any]) -> None:

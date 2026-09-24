@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import subprocess
@@ -48,6 +49,8 @@ class PrinterServicesComponent:
         self.script = os.path.join(
             self.klipper_repo, "scripts", "printer-services.sh"
         )
+        # So two requests at once can't both start a restart.
+        self._restart_lock = asyncio.Lock()
 
         self.server.register_endpoint(
             "/server/printer_services/restart_all",
@@ -90,7 +93,8 @@ class PrinterServicesComponent:
                 "systemd-run",
                 "--unit=%s" % UNIT_NAME,
                 "--collect",
-                # sudo's env_reset means bare --setenv=HOME would inherit root's home, not ours.
+                # sudo's env_reset means bare --setenv=HOME would inherit
+                # root's home, not ours.
                 "--setenv=HOME=%s" % os.path.expanduser("~"),
                 "--property=StandardOutput=append:%s" % log_path,
                 "--property=StandardError=append:%s" % log_path,
@@ -102,10 +106,21 @@ class PrinterServicesComponent:
         )
         await machine.exec_sudo_command(cmd, timeout=10.0)
 
+    async def trigger_restart_all(self) -> bool:
+        """Start scripts/printer-services.sh --restart, as the "Restart All"
+        button does. Returns False if a restart was already running.
+
+        Also used by auto_recovery.
+        """
+        async with self._restart_lock:
+            if await self._is_running():
+                return False
+            await self._start(self._log_path())
+        return True
+
     async def _handle_restart_all(self, web_request: WebRequest) -> Dict[str, Any]:
-        if await self._is_running():
+        if not await self.trigger_restart_all():
             raise self.server.error("A restart-all job is already in progress")
-        await self._start(self._log_path())
         return {"started": True}
 
     async def _handle_status(self, web_request: WebRequest) -> Dict[str, Any]:

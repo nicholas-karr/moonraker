@@ -42,7 +42,14 @@ BASE_CONFIG: Dict[str, Dict[str, str]] = {
     }
 }
 
-OPTION_OVERRIDES = ("channel", "pinned_commit", "refresh_interval", "report_anomalies")
+# Upstream only allows the first four. BioKalico updates Klipper and
+# Moonraker from its own forks with its own install_script, so those options
+# must be read from moonraker.conf too.
+OPTION_OVERRIDES = (
+    "channel", "pinned_commit", "refresh_interval", "report_anomalies",
+    "type", "path", "origin", "primary_branch", "managed_services",
+    "install_script",
+)
 
 class AppType(ExtendedEnum):
     NONE = 1

@@ -35,8 +35,13 @@ class KlippyProcess:
         for _ in range(250):
             if self.pty_path.exists():
                 try:
+                    # O_NOCTTY: a session leader without a controlling
+                    # terminal (CI, cron, systemd) would otherwise adopt this
+                    # PTY as its own, and pytest would receive SIGHUP when
+                    # Klippy exits or restarts.
                     self.fd = os.open(
-                        str(self.pty_path), os.O_RDWR | os.O_NONBLOCK)
+                        str(self.pty_path),
+                        os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
                 except Exception:
                     pass
                 else:

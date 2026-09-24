@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import TYPE_CHECKING, List
 
@@ -46,10 +47,13 @@ class PresencePrune:
         except self.server.error:
             # Namespace doesn't exist until the first heartbeat is posted
             return eventtime + CHECK_INTERVAL
-        cutoff = time.time() - self.max_age_secs
+        # Heartbeat values are JavaScript Date.now(), i.e. milliseconds
+        cutoff_ms = (time.time() - self.max_age_secs) * 1000.
         stale: List[str] = [
             key for key, last_active in items
-            if not isinstance(last_active, (int, float)) or last_active < cutoff
+            if not isinstance(last_active, (int, float))
+            or not math.isfinite(last_active)
+            or last_active < cutoff_ms
         ]
         if stale:
             await db.delete_batch(self.namespace, stale)
