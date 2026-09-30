@@ -6,7 +6,8 @@ import pytest
 import pytest_asyncio
 from tornado.web import HTTPError
 from moonraker.server import Server
-from moonraker.components.authorization import Authorization, HASH_ITER
+from moonraker.common import UserInfo
+from moonraker.components.authorization import Authorization, API_USER, HASH_ITER
 from moonraker.components.simple_password_auth import SimplePasswordAuth, USERNAME
 from fixtures import HttpClient
 
@@ -77,6 +78,44 @@ class TestSimplePasswordAuth:
         # explicitly opts into local_bypass.
         with pytest.raises(HTTPError):
             await auth.authenticate_request(FakeRequest("127.0.0.1"))
+
+    async def test_other_user_accounts_are_removed(self, full_server: Server):
+        auth: Authorization = full_server.lookup_component("authorization")
+        comp: SimplePasswordAuth = full_server.lookup_component(
+            "simple_password_auth"
+        )
+        auth.users["olduser"] = UserInfo(username="olduser", password="x")
+        await auth._sync_user("olduser")
+        await comp.component_init()
+        assert set(auth.users) == {API_USER, USERNAME}
+        cursor = await auth.user_table.execute(
+            "SELECT username FROM authorized_users"
+        )
+        rows = await cursor.fetchall()
+        assert {row[0] for row in rows} == {API_USER, USERNAME}
+
+
+@pytest.mark.run_paths(moonraker_conf="no_simple_password_auth.conf")
+@pytest.mark.asyncio
+class TestSimplePasswordAuthMissingSection:
+    async def test_missing_section_is_added_with_generated_password(
+        self, full_server: Server, path_args
+    ):
+        auth: Authorization = full_server.lookup_component("authorization")
+        assert auth.force_logins is True
+        user = auth.users.get(USERNAME)
+        assert user is not None
+        content = path_args["moonraker.conf"].read_text()
+        match = re.search(
+            r"^\[simple_password_auth\]\npassword:\s*(\S+)\s*$",
+            content, re.MULTILINE
+        )
+        assert match is not None, f"no [simple_password_auth] in {content!r}"
+        expected_hash = hashlib.pbkdf2_hmac(
+            "sha256", match.group(1).encode(), bytes.fromhex(user.salt),
+            HASH_ITER
+        ).hex()
+        assert user.password == expected_hash
 
 
 @pytest.mark.run_paths(moonraker_conf="biokalico_components_local_bypass.conf")
@@ -161,6 +200,39 @@ class TestSimplePasswordAuthHintEndpointDefault:
     ):
         ret = await http_client.get("/server/simple_password_auth/hint")
         assert ret["result"]["password_hint"] == ""
+
+    async def test_login_with_shared_password(
+        self, server: Server, http_client: HttpClient
+    ):
+        ret = await http_client.post(
+            "/access/login", {"username": USERNAME, "password": PASSWORD}
+        )
+        assert ret["result"]["token"]
+        with pytest.raises(http_client.error):
+            await http_client.post(
+                "/access/login", {"username": "other", "password": PASSWORD}
+            )
+
+    @pytest.mark.parametrize(
+        "method,endpoint",
+        [
+            ("GET", "/access/user"),
+            ("POST", "/access/user"),
+            ("GET", "/access/users/list"),
+            ("POST", "/access/user/password"),
+        ],
+    )
+    async def test_user_account_endpoints_are_gone(
+        self, server: Server, http_client: HttpClient, method: str,
+        endpoint: str
+    ):
+        # Unknown paths need a login too, so log in to see the 404.
+        ret = await http_client.post(
+            "/access/login", {"username": USERNAME, "password": PASSWORD}
+        )
+        headers = {"Authorization": f"Bearer {ret['result']['token']}"}
+        with pytest.raises(http_client.error, match="HTTP 404:"):
+            await http_client._do_request(method, endpoint, headers=headers)
 
 
 @pytest.mark.run_paths(moonraker_conf="biokalico_components_with_hint.conf")

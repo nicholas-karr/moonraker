@@ -1471,3 +1471,129 @@ GET /machine/peripherals/canbus?interface=can0
 |               |        | Should be "Klipper" or "Katapult".                          |^
 { #can-uuid-spec } Can UUID
 ///
+## Get Timelapse Settings
+
+Available when [timelapse](../configuration.md#timelapse) is configured.
+
+```{.http .apirequest title="HTTP Request"}
+GET /machine/timelapse/settings
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "machine.timelapse.get_settings",
+    "id": 4656
+}
+```
+
+/// collapse-code
+```{.json .apiresponse title="Example Response"}
+{
+    "enabled": true,
+    "mode": "layermacro",
+    "camera": "",
+    "autorender": true,
+    "parkhead": false,
+    "output_framerate": 30,
+    "blockedsettings": ["enabled"]
+}
+```
+///
+
+/// api-response-spec
+    open: True
+
+Every timelapse setting, as shown in Mainsail's Timelapse settings, plus
+`blockedsettings`, the list of settings set in `moonraker.conf`, which
+cannot be changed through this API.  The example shows only some of the
+settings.
+
+///
+
+## Change Timelapse Settings
+
+Changes the given settings and returns every setting, as
+[Get Timelapse Settings](#get-timelapse-settings) does.  Unknown settings,
+and settings listed in `blockedsettings`, are ignored.
+
+```{.http .apirequest title="HTTP Request"}
+POST /machine/timelapse/settings
+Content-Type: application/json
+
+{
+    "enabled": true,
+    "output_framerate": 24
+}
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "machine.timelapse.post_settings",
+    "params": {
+        "enabled": true,
+        "output_framerate": 24
+    },
+    "id": 4656
+}
+```
+
+## Get Last Timelapse Frame
+
+Returns the number of frames captured for the current or most recent print,
+and the last frame's path in the `timelapse_frames` root.
+
+```{.http .apirequest title="HTTP Request"}
+GET /machine/timelapse/lastframeinfo
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "machine.timelapse.lastframeinfo",
+    "id": 4656
+}
+```
+
+```{.json .apiresponse title="Example Response"}
+{
+    "framecount": 212,
+    "lastframefile": "benchy_20260924_1015/frame_000212.jpg"
+}
+```
+
+## Render Timelapse
+
+Starts rendering the frames of the current or most recent print to a video.
+Progress is reported by the
+[timelapse event](jsonrpc_notifications.md#timelapse-event) notification.
+
+```{.http .apirequest title="HTTP Request"}
+POST /machine/timelapse/render
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "machine.timelapse.render",
+    "id": 4656
+}
+```
+
+```{.json .apiresponse title="Example Response"}
+{
+    "status": "started"
+}
+```
+
+/// api-response-spec
+    open: True
+
+| Field    |  Type  | Description                                         |
+| -------- | :----: | --------------------------------------------------- |
+| `status` | string | `started`, or `skipped` when there are no frames.   |
+| `msg`    | string | The reason a render was skipped.  Only present when |
+|          |        | `status` is `skipped`.                              |^
+
+///

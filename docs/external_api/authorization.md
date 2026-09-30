@@ -21,16 +21,9 @@ a user already logged in, otherwise the `login` API may be used for
 authentication.  Websocket connections will stay authenticated until
 the connection is closed or the user logs out.
 
-User authentication can be performed using a choice sources.  Moonraker
-currently supports the following authentication sources:
-
-| Source Name | Description                                                    |
-| ----------- | -------------------------------------------------------------- |
-| `moonraker` | Authentication is performed using credentials stored in        |
-|             | Moonraker's database.                                          |^
-| `ldap`      | Authentication is performed through a connected LDAP provider. |
-|             | Requires a valid `[LDAP]` configuration.                       |^
-{ #auth-source-desc } Authentication Source
+There is a single user, `biokalico`, whose password is the shared password
+set by [simple_password_auth](../configuration.md#simple_password_auth).
+User accounts cannot be created, deleted or renamed.
 
 /// note
 ECMAScript imposes limitations on certain requests that prohibit the
@@ -52,9 +45,8 @@ POST /access/login
 Content-Type: application/json
 
 {
-    "username": "my_user",
-    "password": "my_password",
-    "source": "moonraker"
+    "username": "biokalico",
+    "password": "my_password"
 }
 ```
 
@@ -63,9 +55,8 @@ Content-Type: application/json
     "jsonrpc": "2.0",
     "method": "access.login",
     "params": {
-        "username": "my_user",
-        "password": "my_password",
-        "source": "moonraker"
+        "username": "biokalico",
+        "password": "my_password"
     },
     "id": 1323
 }
@@ -74,11 +65,10 @@ Content-Type: application/json
 /// api-parameters
     open: True
 
-| Name       |  Type  | Default              | Description                                         |
-| ---------- | :----: | -------------------- | --------------------------------------------------- |
-| `username` | string | **REQUIRED**         | The user login name.                                |
-| `password` | string | **REQUIRED**         | The user password.                                  |
-| `source`   | string | Set by configuration | A valid [authentication source](#auth-source-desc). |
+| Name       |  Type  | Default      | Description                   |
+| ---------- | :----: | ------------ | ----------------------------- |
+| `username` | string | **REQUIRED** | Always `biokalico`.           |
+| `password` | string | **REQUIRED** | The shared password.          |
 
 ///
 
@@ -88,8 +78,7 @@ Content-Type: application/json
     "username": "my_user",
     "token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY4MDAuNDgxNjU1LCAiZXhwIjogMTYxODg4MDQwMC40ODE2NTUsICJ1c2VybmFtZSI6ICJteV91c2VyIiwgInRva2VuX3R5cGUiOiAiYXV0aCJ9.QdieeEskrU0FrH7rXKuPDSZxscM54kV_vH60uJqdU9g",
     "refresh_token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY4MDAuNDgxNzUxNCwgImV4cCI6IDE2MjY2NTI4MDAuNDgxNzUxNCwgInVzZXJuYW1lIjogIm15X3VzZXIiLCAidG9rZW5fdHlwZSI6ICJyZWZyZXNoIn0.btJF0LJfymInhGJQ2xvPwkp2dFUqwgcw4OA_wE-EcCM",
-    "action": "user_logged_in",
-    "source": "moonraker"
+    "action": "user_logged_in"
 }
 ```
 ///
@@ -109,7 +98,6 @@ Content-Type: application/json
 |                 |        | for details.                                                         |^
 | `action`        | string | The action taken by the auth manager.  Will always be                |
 |                 |        | "user_logged_in".                                                    |^
-| `source`        | string | The [authentication source](#auth-source-desc) used.                 |
 
 ///
 
@@ -149,280 +137,6 @@ POST /access/logout
 | `username` | string | The name of the logged out user.                      |
 | `action`   | string | The action taken by the auth manager.  Will always be |
 |            |        | "user_logged_out".                                    |^
-
-///
-
-## Get Current User
-
-```{.http .apirequest title="HTTP Request"}
-GET /access/user
-```
-
-```{.json .apirequest title="JSON-RPC Request"}
-{
-    "jsonrpc": "2.0",
-    "method": "access.get_user",
-    "id": 1323
-}
-```
-
-Returns: An object containing the currently logged in user name, the source and
-the date on which the user was created (in unix time).
-/// collapse-code
-```{.json .apiresponse title="Example Response"}
-{
-    "username": "my_user",
-    "source": "moonraker",
-    "created_on": 1618876783.8896716
-}
-```
-///
-
-/// api-response-spec
-    open: True
-
-| Field        |  Type  | Description                                          |
-| ------------ | :----: | ---------------------------------------------------- |
-| `username`   | string | The name of the logged in user.                      |
-| `source`     | string | The [source](#auth-source-desc) used to authenticate |
-|              |        | the user.                                            |^
-| `created_on` | float  | The date, in unix time, the user entry was created.  |
-
-///
-
-## Create User
-
-Creates a new local user and logs them in.
-
-```{.http .apirequest title="HTTP Request"}
-POST /access/user
-Content-Type: application/json
-
-{
-    "username": "my_user",
-    "password": "my_password"
-}
-```
-
-```{.json .apirequest title="JSON-RPC Request"}
-{
-    "jsonrpc": "2.0",
-    "method": "access.post_user",
-    "params": {
-        "username": "my_user",
-        "password": "my_password"
-    },
-    "id": 1323
-}
-```
-
-/// api-parameters
-    open: True
-
-| Name       |  Type  | Default      | Description          |
-| ---------- | :----: | ------------ | -------------------- |
-| `username` | string | **REQUIRED** | The user login name. |
-| `password` | string | **REQUIRED** | The user password.   |
-
-///
-
-
-/// collapse-code
-```{.json .apiresponse title="Example Response"}
-{
-    "username": "my_user",
-    "token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY3ODMuODkxNjE5LCAiZXhwIjogMTYxODg4MDM4My44OTE2MTksICJ1c2VybmFtZSI6ICJteV91c2VyIiwgInRva2VuX3R5cGUiOiAiYXV0aCJ9.oH0IShTL7mdlVs4kcx3BIs_-1j0Oe-qXezJKjo-9Xgo",
-    "refresh_token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY3ODMuODkxNzAyNCwgImV4cCI6IDE2MjY2NTI3ODMuODkxNzAyNCwgInVzZXJuYW1lIjogIm15X3VzZXIiLCAidG9rZW5fdHlwZSI6ICJyZWZyZXNoIn0.a6ZeRjk8RQQJDDH0JV-qGY_d_HIgfI3XpsqUlUaFT7c",
-    "source": "moonraker",
-    "action": "user_created"
-}
-```
-///
-
-/// api-response-spec
-    open: True
-
-| Field           |  Type  | Description                                                           |
-| --------------- | :----: | --------------------------------------------------------------------- |
-| `username`      | string | The name of the created user.                                         |
-| `token`         | string | A JSON Web Token (JWT) used to authenticate requests, also commonly   |
-|                 |        | referred to as an `access token`.  HTTP requests should include this  |^
-|                 |        | token in the `Authorization` header as a `Bearer` type.  This token   |^
-|                 |        | expires after 1 hour.                                                 |^
-| `refresh_token` | string | A JWT that should be used to generate new access tokens after they    |
-|                 |        | expire.  See the [refresh token section](#refresh-json-web-token)     |^
-|                 |        | for details.                                                          |^
-| `action`        | string | The action taken by the auth manager.  Will always be "user_created". |
-| `source`        | string | The [authentication source](#auth-source-desc) used.                  |
-
-///
-
-/// note
-Unlike `/access/login`, `/access/user` is a protected endpoint.  To
-create a new user a client must either be trusted, use the API Key,
-or be logged in as another user.
-///
-
-## Delete User
-
-/// note
-A request to delete a user MUST come from an authorized login
-other than the account to be deleted.  This can be a "trusted user",
-the "api key user", or any other user account.
-///
-
-```{.http .apirequest title="HTTP Request"}
-DELETE /access/user
-Content-Type: application/json
-
-{
-    "username": "my_username"
-}
-```
-
-```{.json .apirequest title="JSON-RPC Request"}
-{
-    "jsonrpc": "2.0",
-    "method": "access.delete_user",
-    "params": {
-        "username": "my_username"
-    },
-    "id": 1323
-}
-```
-
-/// api-parameters
-    open: True
-
-| Name       | Type | Default      | Description                          |
-| ---------- | :--: | ------------ | ------------------------------------ |
-| `username` | str  | **REQUIRED** | The username of the entry to delete. |
-
-///
-
-/// collapse-code
-```{.json .apiresponse title="Example Response"}
-{
-    "username": "my_user",
-    "action": "user_deleted"
-}
-```
-///
-
-/// api-response-spec
-    open: True
-
-| Field      |  Type  | Description                                       |
-| ---------- | :----: | ------------------------------------------------- |
-| `username` | string | The username of the deleted entry.                |
-| `action`   | string | The action taken by the auth manager. Will always |
-|            |        | be "user_deleted".                                |^
-
-///
-
-## List Available Users
-
-```{.http .apirequest title="HTTP Request"}
-GET /access/users/list
-```
-
-```{.json .apirequest title="JSON-RPC Request"}
-{
-    "jsonrpc": "2.0",
-    "method": "access.users.list",
-    "id": 1323
-}
-```
-
-/// collapse-code
-```{.json .apiresponse title="Example Response"}
-{
-    "users": [
-        {
-            "username": "testuser",
-            "source": "moonraker",
-            "created_on": 1618771331.1685035
-        },
-        {
-            "username": "testuser2",
-            "source": "ldap",
-            "created_on": 1620943153.0191233
-        }
-    ]
-}
-```
-///
-
-/// api-response-spec
-    open: True
-
-| Field   |   Type   | Description                      |
-| ------- | :------: | -------------------------------- |
-| `users` | [object] | An array of `User Info` objects. |
-|         |          | #user-info-spec                  |+
-
-| Field        |  Type  | Description                                          |
-| ------------ | :----: | ---------------------------------------------------- |
-| `username`   | string | The username of the entry.                           |
-| `source`     | string | The [source](#auth-source-desc) that must be used to |
-|              |        | authenticate the user.                               |^
-| `created_on` | float  | The date, in unix time, the user entry was created.  |
-{ #user-info-spec } User Info
-
-///
-
-## Reset User Password
-
-```{.http .apirequest title="HTTP Request"}
-POST /access/user/password
-Content-Type: application/json
-
-{
-    "password": "my_current_password",
-    "new_password": "my_new_pass"
-}
-```
-
-```{.json .apirequest title="JSON-RPC Request"}
-{
-    "jsonrpc": "2.0",
-    "method": "access.user.password",
-    "params": {
-        "password": "my_current_password",
-        "new_password": "my_new_pass"
-    },
-    "id": 1323
-}
-```
-
-/// api-parameters
-    open: True
-
-| Name           |  Type  | Default      | Description                  |
-| -------------- | :----: | ------------ | ---------------------------- |
-| `password`     | string | **REQUIRED** | The user's current password. |
-| `new_password` | string | **REQUIRED** | The user's new password.     |
-
-///
-
-
-/// collapse-code
-```{.json .apiresponse title="Example Response"}
-{
-    "username": "my_user",
-    "action": "user_password_reset"
-}
-```
-///
-
-/// api-response-spec
-    open: True
-
-| Field      |  Type  | Description                                         |
-| ---------- | :----: | --------------------------------------------------- |
-| `username` | string | The username of the entry whose password was reset. |
-| `action`   | string | Action taken by the Auth manager.  Will always be   |
-|            |        | "user_password_reset".                              |^
 
 ///
 
@@ -466,7 +180,6 @@ Content-Type: application/json
 {
     "username": "my_user",
     "token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzgyNDMuNTE2Nzc5MiwgImV4cCI6IDE2MTg4ODE4NDMuNTE2Nzc5MiwgInVzZXJuYW1lIjogInRlc3R1c2VyIiwgInRva2VuX3R5cGUiOiAiYXV0aCJ9.Ia_X_pf20RR4RAEXcxalZIOzOBOs2OwearWHfRnTSGU",
-    "source": "moonraker",
     "action": "user_jwt_refresh"
 }
 ```
@@ -482,7 +195,6 @@ Content-Type: application/json
 |            |        | referred to as an `access token`.  HTTP requests should include this |^
 |            |        | token in the `Authorization` header as a `Bearer` type.  This token  |^
 |            |        | expires after 1 hour.                                                |^
-| `source`   | string | The [authentication source](#auth-source-desc) of the user entry.    |
 | `action`   | string | The action taken by the Auth Manager.  Will always be                |
 |            |        | "user_jwt_refresh".                                                  |^
 
@@ -548,12 +260,7 @@ GET /access/info
 /// collapse-code
 ```{.json .apiresponse title="Example Response"}
 {
-    "default_source": "moonraker",
-    "available_sources": [
-        "moonraker",
-        "ldap"
-    ],
-    "login_required": false,
+    "login_required": true,
     "trusted": true
 }
 ```
@@ -562,15 +269,47 @@ GET /access/info
 /// api-response-spec
     open: True
 
-| Field               |   Type   | Description                                          |
-| ------------------- | :------: | ---------------------------------------------------- |
-| `default_source`    |  string  | The configured default                               |
-|                     |          | [authentication source](#auth-source-desc).          |^
-| `available_sources` | [string] | An array of available authentication sources.        |
-| `login_required`    |   bool   | Set to `true` when `force_logins` is enabled via the |
-|                     |          | configuration at least one user has been created.    |^
-| `trusted`           |   bool   | Set to `true` when the connection making the info    |
-|                     |          | request is a trusted connection.                     |^
+| Field            | Type | Description                                        |
+| ---------------- | :--: | -------------------------------------------------- |
+| `login_required` | bool | Set to `true` once the shared password is in use.  |
+| `trusted`        | bool | Set to `true` when the connection making the info  |
+|                  |      | request is a trusted connection.                   |^
+
+///
+
+/// note
+This endpoint may be accessed by unauthorized clients.
+///
+
+## Get the Login Hint
+
+Returns the reminder text shown on Mainsail's login screen, set by the `hint`
+option of [simple_password_auth](../configuration.md#simple_password_auth).
+
+```{.http .apirequest title="HTTP Request"}
+GET /server/simple_password_auth/hint
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.simple_password_auth.hint",
+    "id": 1323
+}
+```
+
+```{.json .apiresponse title="Example Response"}
+{
+    "password_hint": "ask the lab manager"
+}
+```
+
+/// api-response-spec
+    open: True
+
+| Field           |  Type  | Description                                  |
+| --------------- | :----: | -------------------------------------------- |
+| `password_hint` | string | The configured hint, or an empty string.     |
 
 ///
 

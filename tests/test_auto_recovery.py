@@ -41,13 +41,30 @@ class _PrinterServices:
         return self.started
 
 
+class _SysProvider:
+    def __init__(self, server: Optional["_FakeServer"] = None) -> None:
+        self.server = server
+        self.reboots = 0
+        # Events already sent when reboot() ran, to check the order.
+        self.events_at_reboot: List[tuple] = []
+
+    async def reboot(self) -> None:
+        self.reboots += 1
+        if self.server is not None:
+            self.events_at_reboot = list(self.server.events)
+
+
 class _Machine:
     def __init__(self) -> None:
         self.commands: List[str] = []
+        self.provider = _SysProvider()
 
     async def exec_sudo_command(self, command: str, timeout: float = 2.0) -> str:
         self.commands.append(command)
         return ""
+
+    def get_system_provider(self) -> _SysProvider:
+        return self.provider
 
 
 class _KlippyAPI:
@@ -116,8 +133,11 @@ class _FakeServer:
     def error(self, msg: str) -> ServerError:
         return ServerError(msg)
 
-    def send_event(self, name: str, *args: Any) -> None:
+    def send_event(self, name: str, *args: Any) -> asyncio.Future:
         self.events.append((name, args))
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(None)
+        return fut
 
     def register_notification(self, name: str) -> None:
         pass
@@ -135,6 +155,7 @@ def _component(server: _FakeServer, **overrides: Any) -> AutoRecoveryComponent:
     component.mcu_recovery_enabled = True
     component.mcu_max_attempts = 2
     component.mcu_cooldown = 120.0
+    component.mcu_reboot_enabled = False
     component.projector_recovery_enabled = False
     component.projector_port_path = None
     component.projector_hub_path = None
@@ -153,6 +174,7 @@ class TestAutoRecoveryLoads:
         comp = full_server.lookup_component("auto_recovery")
         assert isinstance(comp, AutoRecoveryComponent)
         assert comp.mcu_recovery_enabled is True
+        assert comp.mcu_reboot_enabled is False
         assert comp.projector_recovery_enabled is False
 
     @pytest.mark.asyncio
@@ -531,3 +553,173 @@ async def test_projector_gives_up_after_port_reset_without_a_hub_path():
 
     assert machine.commands == []
     assert server.database.records[key]["gave_up"] is True
+
+
+MCU_CONNECT_ERROR = (
+    "mcu 'mcu': Unable to connect\nOnce the underlying issue is corrected, "
+    "use the\n\"FIRMWARE_RESTART\" command to reset the firmware"
+)
+
+
+@pytest.mark.asyncio
+async def test_klippy_started_in_mcu_connect_error_triggers_restart_all():
+    """An MCU that is missing at startup leaves Klipper in "error", not
+    "shutdown", and Moonraker raises no shutdown event for it."""
+    services = _PrinterServices()
+    server = _FakeServer(
+        job_state=_JobState("standby"),
+        printer_services=services,
+        klippy_state=KlippyState.ERROR,
+        state_message=MCU_CONNECT_ERROR,
+    )
+    component = _component(server)
+
+    await component._on_klippy_started(KlippyState.ERROR)
+
+    assert services.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", [
+    "Option 'step_pin' in section 'stepper_x' must be specified",
+    "MCU Protocol error\nThis is frequently caused by running an older "
+    "version of the firmware",
+])
+async def test_klippy_started_in_other_error_is_not_recovered(message):
+    services = _PrinterServices()
+    server = _FakeServer(
+        job_state=_JobState("standby"),
+        printer_services=services,
+        klippy_state=KlippyState.ERROR,
+        state_message=message,
+    )
+    component = _component(server)
+
+    await component._on_klippy_started(KlippyState.ERROR)
+
+    assert services.calls == 0
+    assert server.events == []
+
+
+@pytest.mark.asyncio
+async def test_recheck_retries_an_mcu_connect_error():
+    services = _PrinterServices()
+    server = _FakeServer(
+        job_state=_JobState("standby"),
+        printer_services=services,
+        klippy_state=KlippyState.ERROR,
+        state_message=MCU_CONNECT_ERROR,
+    )
+    component = _component(server)
+    await component._on_klippy_started(KlippyState.ERROR)
+    record = server.database.records[("auto_recovery", "mcu_recovery")]
+    record["triggered_at"] = 0.0
+
+    await component._recheck_mcu_shutdown()
+
+    assert services.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_host_reboot_follows_failed_restarts_and_is_announced_first():
+    services = _PrinterServices()
+    machine = _Machine()
+    server = _FakeServer(
+        job_state=_JobState("standby"),
+        printer_services=services,
+        machine=machine,
+    )
+    machine.provider.server = server
+    component = _component(
+        server, mcu_max_attempts=2, mcu_cooldown=0.0, mcu_reboot_enabled=True
+    )
+
+    await component._on_klippy_shutdown()
+    await component._on_klippy_shutdown()
+    assert machine.provider.reboots == 0
+
+    await component._on_klippy_shutdown()
+
+    assert services.calls == 2
+    assert machine.provider.reboots == 1
+    # The reboot announcement went out before the reboot itself.
+    assert any("REBOOTING" in e[1][0] for e in machine.provider.events_at_reboot)
+    record = server.database.records[("auto_recovery", "mcu_recovery")]
+    assert record["rebooted"] is True
+
+
+@pytest.mark.asyncio
+async def test_host_reboot_happens_once_per_incident():
+    """The fault surviving the reboot must end in giving up, not a reboot
+    loop."""
+    services = _PrinterServices()
+    machine = _Machine()
+    server = _FakeServer(
+        job_state=_JobState("standby"),
+        printer_services=services,
+        machine=machine,
+    )
+    component = _component(
+        server, mcu_max_attempts=1, mcu_cooldown=0.0, mcu_reboot_enabled=True
+    )
+
+    for _ in range(4):
+        await component._on_klippy_shutdown()
+
+    assert services.calls == 1
+    assert machine.provider.reboots == 1
+    give_ups = [e for e in server.events if "giving up" in e[1][0]]
+    assert len(give_ups) == 1
+    assert "host reboot" in give_ups[0][1][0]
+
+
+@pytest.mark.asyncio
+async def test_host_reboot_disabled_by_default_gives_up_instead():
+    services = _PrinterServices()
+    machine = _Machine()
+    server = _FakeServer(
+        job_state=_JobState("standby"),
+        printer_services=services,
+        machine=machine,
+    )
+    component = _component(server, mcu_max_attempts=1, mcu_cooldown=0.0)
+
+    await component._on_klippy_shutdown()
+    await component._on_klippy_shutdown()
+
+    assert machine.provider.reboots == 0
+    assert any("giving up" in e[1][0] for e in server.events)
+
+
+@pytest.mark.asyncio
+async def test_host_reboot_never_happens_mid_print():
+    machine = _Machine()
+    server = _FakeServer(
+        job_state=_JobState("printing"),
+        printer_services=_PrinterServices(),
+        machine=machine,
+    )
+    component = _component(
+        server, mcu_max_attempts=1, mcu_cooldown=0.0, mcu_reboot_enabled=True
+    )
+    server.database.records[("auto_recovery", "mcu_recovery")] = {
+        "attempt": 1, "triggered_at": 0.0, "gave_up": False,
+    }
+
+    await component._on_klippy_shutdown()
+
+    assert machine.provider.reboots == 0
+
+
+@pytest.mark.asyncio
+async def test_klippy_ready_announces_recovery_after_a_host_reboot():
+    server = _FakeServer(job_state=_JobState("standby"))
+    component = _component(server)
+    server.database.records[("auto_recovery", "mcu_recovery")] = {
+        "attempt": 2, "triggered_at": 0.0, "gave_up": False, "rebooted": True,
+    }
+
+    await component._on_klippy_ready()
+
+    assert any("host reboot" in e[1][0] for e in server.events)
+    assert server.database.records[("auto_recovery", "mcu_recovery")] == {}

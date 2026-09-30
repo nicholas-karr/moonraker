@@ -451,7 +451,8 @@ the values accepted by the webcam's `service` option:
 ### `[authorization]`
 
 The `[authorization]` section provides configuration for Moonraker's
-authorization module.
+authorization module.  Logins use the shared password set by
+[simple_password_auth](#simple_password_auth).
 
 ```ini {title="Moonraker Config Specification"}
 # moonraker.conf
@@ -498,14 +499,6 @@ cors_domains:
 #   When CORS is enabled by adding an entry to this option, all origins
 #   matching the "trusted_clients" option will have CORS headers set as
 #   well.  If this option is not specified then CORS is disabled.
-force_logins: False
-#   When set to True a user login is required for authorization if at least
-#   one user has been created, overriding the "trusted_clients" configuration.
-#   If no users have been created then trusted client checks will apply.
-#   The default is False.
-default_source: moonraker
-#   The default source used to authenticate user logins. Can be "ldap" or
-#   "moonraker"  The default is "moonraker".
 ```
 
 /// Tip
@@ -516,6 +509,33 @@ lookup. If the DNS service is not available then authentication will fail
 and an error will be returned.  In addition, DNS lookups will introduce delay
 in the response.
 ///
+
+### `[simple_password_auth]`
+
+One shared password for Mainsail, and the only way to log in.  It registers a
+single user, `biokalico`, with this password and removes every other user
+account.  Every request then needs a login, except requests that carry the
+API key and, if `local_bypass` is set, requests from `trusted_clients`.  This
+component always loads.  If the section is missing, it is added to
+`moonraker.conf` with a generated password.
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[simple_password_auth]
+password:
+#   The shared password.  Leading and trailing whitespace is ignored.  When
+#   blank, a random password is generated on first start and written back
+#   into this option.  Changing the password logs out every session.
+local_bypass: False
+#   When set to True, requests from the [authorization] trusted_clients need
+#   no password, except requests that came through a Cloudflare Tunnel
+#   (these carry a Cf-Connecting-Ip or Cf-Ray header).  Only set this on a
+#   private network.  The default is False.
+hint:
+#   A reminder shown on Mainsail's login screen.  One layer of matching
+#   quotes is removed.  The default is no hint.
+```
 
 ## Optional Components
 
@@ -571,62 +591,6 @@ information is reported in the metadata's `file_processors` field.
 When `enable_auto_analysis` is set to `true` a post-process will
 be performed if the file has not been previously processed.
 ///
-
-### `[ldap]`
-
-The `ldap` module may be used by `[authorization]` to perform user
-authentication though an ldap server.
-
-```ini {title="Moonraker Config Specification"}
-# moonraker.conf
-
-[ldap]
-ldap_host: ldap.local
-#   The host address of the LDAP server.  This parameter must be provided
-ldap_port:
-#   The LDAP server's port.  The default is 389 for standard connections
-#   and 636 for SSL/TLS connections.
-ldap_secure: True
-#   Enables LDAP over SSL/TLS. The default is False.
-base_dn: DC=ldap,DC=local
-#   The base distinguished name used to search for users on the server.
-#   This option accepts Jinja2 Templates, see the [secrets] section for details.
-#   This parameter must be provided.
-bind_dn: {secrets.ldap_credentials.bind_dn}
-#   The distinguished name for bind authentication.  For example:
-#       CN=moonraker,OU=Users,DC=ldap,DC=local
-#   This option accepts Jinja2 Templates, see the [secrets] section for
-#   details.  By default the ldap client will attempt to bind anonymously.
-bind_password: {secrets.ldap_credentials.bind_password}
-#   The password for bind authentication. This option accepts Jinja2 Templates,
-#   see the [secrets] section for details.  This parameter must be provided
-#   if a "bind_dn" is specified, otherwise it must be omitted.
-group_dn: CN=moonraker,OU=Groups,DC=ldap,DC=local
-#   A group distinguished name in which the user must be a member of to pass
-#   authentication.  This option accepts Jinja2 Templates, see the [secrets]
-#   section for details. The default is no group requirement.
-is_active_directory: True
-#   Enables support for Microsoft Active Directory. This option changes the
-#   field used to lookup a user by username to sAMAccountName.
-#   The default is False.
-user_filter: (&(objectClass=user)(cn=USERNAME))
-#   Allows filter of users by custom LDAP query. Must contain the USERNAME
-#   token, it will be replaced by the user's username during lookup. Will
-#   override the change done by is_active_directory. This option accepts
-#   Jinja2 Templates, see the [secrets] section for details.
-#   The default is empty, which will change the lookup query depending on
-#   is_active_directory.
-membership_attribute: memberOf
-#   The name of the attribute that contains a list of groups the user is
-#   a member of.  Can be "memberOf" or "isMemberOf".  Default is "memberOf".
-check_dn_case: True
-#   Determines whether or not DN comparisons performed by Moonraker are
-#   case sensitive.  Currently this applies to the 'group_dn' when it is
-#   configured.  Default is True.
-#   Note:  This option does NOT apply to LDAP search operations.  The LDAP
-#   spec states that DN comparisons should not be case sensitive, however it
-#   is possible for server and/or administrator to override this behavior.
-```
 
 ### `[octoprint_compat]`
 Enables partial support of OctoPrint API is implemented with the purpose of
@@ -3133,7 +3097,6 @@ dependencies = [
     "jinja2==3.1.6",
     "dbus-fast>=2.21.3, <=3.1.2",
     "apprise>=1.9.3, <=1.9.8",
-    "ldap3==2.9.1",
     "python-periphery==2.4.1",
     "importlib_metadata>=6.7.0, <=8.7.1",
 ]
@@ -3167,7 +3130,8 @@ events: *
 #      paused
 #      resumed
 #   Valid system health events (see the [health_monitor] section below for
-#   disk_low/disk_recovered/cpu_temp_high/cpu_temp_normal, the others are
+#   disk_low/disk_recovered/cpu_temp_high/cpu_temp_normal and the
+#   [auto_recovery] section for auto_recovery_action, the others are
 #   raised elsewhere in Moonraker):
 #      klippy_shutdown
 #      klippy_disconnect
@@ -3176,6 +3140,7 @@ events: *
 #      disk_recovered
 #      cpu_temp_high
 #      cpu_temp_normal
+#      auto_recovery_action
 #   This option may also be set to "gcode" if the notifier should only push
 #   "gcode_macro" notifications sent from Klipper. This parameter must be provided.
 body: "Your printer status has changed to {event_name}"
@@ -3226,7 +3191,7 @@ Currently the notifier supports three kinds of events: those triggered by
 a change in the job state, those triggered from a remote method call from
 a `gcode_macro`, and system health events (`klippy_shutdown`,
 `klippy_disconnect`, `cpu_throttled`, `disk_low`, `disk_recovered`,
-`cpu_temp_high`, `cpu_temp_normal`).
+`cpu_temp_high`, `cpu_temp_normal`, `auto_recovery_action`).
 
 For `remote method` and system health events the `event_args` field will
 always be an empty list; use `event_message` instead, which contains a
@@ -3316,6 +3281,158 @@ cpu_temp_threshold:
 #   value. Safe temperatures vary significantly by board, so this check
 #   is disabled unless a value is set. The default is no check.
 ```
+
+### `[auto_recovery]`
+
+Recovers from printer faults that are known to be safe to recover from.
+When Klipper shuts down after a micro-controller communication fault, or
+starts in an error state because it could not connect to a micro-controller,
+while the printer is idle, it runs the same restart sequence as Mainsail's
+"Restart All" button, which requires [printer_services](#printer_services).
+If that keeps failing it can reboot the host once per fault, after sending
+the announcement.
+When the SLA projector's serial link drops, it resets the USB port of the
+projector's serial adapter, and optionally power-cycles its hub, while the
+printer is idle or paused.  It never undoes an emergency stop, and gives up
+after a set number of attempts per fault.  Each action is sent as the
+`auto_recovery_action` event, which a [notifier](#notifier) can send on.
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[auto_recovery]
+mcu_recovery_enabled: True
+#   Enables recovery from a micro-controller shutdown.  The default is True.
+mcu_recovery_max_attempts: 2
+#   The number of restarts tried per shutdown before giving up.  The default
+#   is 2.
+mcu_recovery_cooldown_seconds: 120
+#   The minimum time, in seconds, between restart attempts.  The default is
+#   120.
+mcu_recovery_reboot_enabled: False
+#   When True, reboots the host once the restart attempts are used up and
+#   the fault persists, then gives up if the fault survives the reboot.  The
+#   reboot is announced through auto_recovery_action first, and Moonraker
+#   waits up to 30 seconds for notifiers to send it.  It never reboots while
+#   a print is running or paused.  The default is False.
+projector_recovery_enabled: False
+#   Enables recovery of the projector's serial link.  The default is False.
+projector_usb_port_path:
+#   The sysfs directory of the USB port the projector's serial adapter is
+#   plugged into, for example /sys/bus/usb/devices/1-3:1.0/1-3-port4.  Find
+#   it with `udevadm info -a -n <serial device>`.  This parameter must be
+#   provided when projector_recovery_enabled is True.
+projector_usb_hub_path:
+#   The sysfs path of the hub to power-cycle when resetting the port does
+#   not help.  This resets everything on the hub, including any Klipper
+#   micro-controller, and can end a paused print, so only set it for a hub
+#   that switches power for all ports together and has nothing else
+#   important on it.  Find it with `readlink -f /sys/bus/usb/devices/<hub>`.
+#   The default is not to power-cycle the hub.
+projector_recovery_check_interval: 300
+#   The time, in seconds, between link checks while the printer is idle.
+#   The default is 300.
+```
+
+### `[firmware_build]`
+
+Builds and flashes the micro-controllers declared by `[firmware_build]`
+sections in `printer.cfg`, for the Firmware panel on Mainsail's Machine
+page.  It refuses to flash while a print is running or paused.  See
+[the firmware endpoints](external_api/server.md#list-firmware-targets).
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[firmware_build]
+klipper_repo: ~/klipper
+#   The path to the Klipper checkout that holds
+#   scripts/firmware/build_and_flash.py.  The default is ~/klipper.
+printer_cfg_path:
+#   The printer.cfg to read the [firmware_build] targets from.  The default
+#   is printer.cfg in the config folder of Moonraker's data path.
+```
+
+### `[home_root]`
+
+Adds a folder, by default the home folder, as a root in Mainsail's file
+browser on the Machine page.
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[home_root]
+root_name: home
+#   The name of the root.  The default is home.
+path: ~
+#   The folder to add.  The default is ~.
+full_access: False
+#   When set to True, files in the root can be changed and deleted.  The
+#   default is False.
+```
+
+### `[presence_prune]`
+
+Deletes old entries written by Mainsail's warning that other browsers are
+connected, so the database does not keep growing.  Checks once an hour.
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[presence_prune]
+namespace: biokalico_presence
+#   The database namespace to prune.  The default is biokalico_presence.
+max_age_days: 3
+#   Entries older than this many days are deleted.  The default is 3.
+```
+
+### `[printer_services]`
+
+Backend for Mainsail's "Restart All" button.  It runs
+`scripts/printer-services.sh --restart` through sudo as a separate systemd
+unit, so the script keeps running while it restarts Moonraker.  See
+[the restart endpoints](external_api/server.md#restart-all-printer-services).
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[printer_services]
+klipper_repo: ~/klipper
+#   The path to the Klipper checkout that holds
+#   scripts/printer-services.sh.  The default is ~/klipper.
+```
+
+### `[timelapse]`
+
+Records one frame per layer and renders each print to a video, for
+Mainsail's Timelapse page.  Frames are captured by the `TIMELAPSE_TAKE_FRAME`
+macro, which the slicer calls on each layer change.  Each print's frames are
+kept until its video renders successfully, and frames left by an interrupted
+print are rendered as `<job>-recovered.mp4` after the next Klipper start.
+Only the "layermacro" mode is supported, and head parking only supports
+rectangular cartesian and corexy printers.  See
+[the timelapse endpoints](external_api/machine.md#get-timelapse-settings).
+
+```ini {title="Moonraker Config Specification"}
+# moonraker.conf
+
+[timelapse]
+enabled: False
+#   When set to True, TIMELAPSE_TAKE_FRAME captures frames.  The default is
+#   False.
+output_path: ~/printer_data/timelapse/
+#   The folder finished videos are written to.  Frames are kept in its tmp
+#   subfolder.  The default is ~/printer_data/timelapse/.
+ffmpeg_binary_path: /usr/bin/ffmpeg
+#   The ffmpeg program used to render videos.  The default is
+#   /usr/bin/ffmpeg.
+```
+
+Any other setting shown in Mainsail's Timelapse settings may also be set
+here, using the names returned by the
+[settings endpoint](external_api/machine.md#get-timelapse-settings), for
+example `camera`, `parkhead` or `output_framerate`.  A setting made here
+cannot be changed in Mainsail.
 
 ### `[simplyprint]`
 

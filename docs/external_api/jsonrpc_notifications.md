@@ -714,72 +714,6 @@ notify_history_changed
 
 ///
 
-## Authorized User Created
-
-Moonraker's `[authorization]` component will emit a notification when
-a new user entry has been created.
-
-```{.text title="Notification Method Name"}
-notify_user_created
-```
-
-```{.json .apiresponse title="Example Notification"}
-{
-    "jsonrpc": "2.0",
-    "method": "notify_user_created",
-    "params": [
-        {
-            "username": "Eric"
-        }
-    ]
-}
-```
-
-/// api-notification-spec
-    open: True
-
-| Pos |  Type  | Description                                             |
-| --- | :----: | ------------------------------------------------------- |
-| 0   | object | An [Auth Notification](#auth-notification-spec) object. |
-
-| Field      |  Type  | Description                                    |
-| ---------- | :----: | ---------------------------------------------- |
-| `username` | string | The username of the user entry associated with |
-|            |        | the notification.                              |^
-{ #auth-notification-spec } Auth Notification
-
-///
-
-## Authorized User Deleted
-
-Moonraker's `[authorization]` component will emit a notification when
-an existing user entry has been deleted.
-
-```{.text title="Notification Method Name"}
-notify_user_deleted
-```
-
-```{.json .apiresponse title="Example Notification"}
-{
-    "jsonrpc": "2.0",
-    "method": "notify_user_deleted",
-    "params": [
-        {
-            "username": "Eric"
-        }
-    ]
-}
-```
-
-/// api-notification-spec
-    open: True
-
-| Pos |  Type  | Description                                             |
-| --- | :----: | ------------------------------------------------------- |
-| 0   | object | An [Auth Notification](#auth-notification-spec) object. |
-
-///
-
 ## Authorized User Logged Out
 
 Moonraker's `[authorization]` component will emit a notification when
@@ -807,6 +741,12 @@ notify_user_logged_out
 | Pos |  Type  | Description                                             |
 | --- | :----: | ------------------------------------------------------- |
 | 0   | object | An [Auth Notification](#auth-notification-spec) object. |
+
+| Field      |  Type  | Description                                    |
+| ---------- | :----: | ---------------------------------------------- |
+| `username` | string | The username of the user entry associated with |
+|            |        | the notification.                              |^
+{ #auth-notification-spec } Auth Notification
 
 ///
 
@@ -1188,6 +1128,84 @@ Each `sudo message` can fall into one of the following categories:
 - A response from a task that successfully ran with sudo permissions.
 - A response from a task that returned an error.
 ////
+
+///
+
+## Timelapse event
+
+Sent by the [timelapse](../configuration.md#timelapse) component when a
+frame is captured and while a video renders.
+
+```{.text title="Notification Method Name"}
+notify_timelapse_event
+```
+
+```{.json .apiresponse title="Example Notification"}
+{
+    "jsonrpc": "2.0",
+    "method": "notify_timelapse_event",
+    "params": [
+        {
+            "action": "render",
+            "status": "success",
+            "filename": "benchy_20260924_1015.mp4",
+            "printfile": "benchy.gcode",
+            "previewimage": "benchy_20260924_1015.jpg"
+        }
+    ]
+}
+```
+
+/// api-notification-spec
+    open: True
+
+| Pos |  Type  | Description                                                   |
+| --- | :----: | ------------------------------------------------------------- |
+| 0   | object | A [Timelapse Event](#timelapse-event-notify-spec) object.     |
+
+| Field          |  Type  | Description                                           |
+| -------------- | :----: | ----------------------------------------------------- |
+| `action`       | string | `newframe` or `render`.                               |
+| `status`       | string | For `newframe`: `success` or `error`.  For `render`:  |
+|                |        | `started`, `running`, `success` or `error`.           |^
+| `frame`        | string | The frame count.  `newframe` with `success` only.     |
+| `framefile`    | string | The new frame's path in the `timelapse_frames` root.  |
+|                |        | `newframe` with `success` only.                       |^
+| `framecount`   | string | The number of frames to render.  `started` only.      |
+| `progress`     |  int   | Render progress in percent.  `running` only.          |
+| `filename`     | string | The rendered video.  `render` with `success` only.    |
+| `printfile`    | string | The G-code file the video was made from.  `render`    |
+|                |        | with `success` only.                                  |^
+| `previewimage` | string | The video's preview image, when one was made.         |
+{ #timelapse-event-notify-spec } Timelapse Event
+
+///
+
+## Automatic recovery action
+
+Sent by the [auto_recovery](../configuration.md#auto_recovery) component each
+time it acts, gives up, or cannot act.
+
+```{.text title="Notification Method Name"}
+notify_auto_recovery_action
+```
+
+```{.json .apiresponse title="Example Notification"}
+{
+    "jsonrpc": "2.0",
+    "method": "notify_auto_recovery_action",
+    "params": [
+        "Klipper reported a shutdown while idle - attempting automatic recovery (attempt 1/2): restarting services and the MCU firmware. Klipper, Moonraker and this printer's web UI will be briefly unreachable."
+    ]
+}
+```
+
+/// api-notification-spec
+    open: True
+
+| Pos |  Type  | Description                                |
+| --- | :----: | ------------------------------------------ |
+| 0   | string | A description of what was done and why.    |
 
 ///
 

@@ -143,7 +143,6 @@ GET /server/config
         },
         "authorization": {
             "login_timeout": 90,
-            "force_logins": false,
             "cors_domains": [
                 "*.home",
                 "http://my.mainsail.xyz",
@@ -646,4 +645,265 @@ Not Available
 | Field          | Type | Description                              |
 | -------------- | :--: | ---------------------------------------- |
 | `websocket_id` | int  | A unique identifier for this connection. |
+///
+
+## List Firmware Targets
+
+Available when [firmware_build](../configuration.md#firmware_build) is
+configured.  Lists the `[firmware_build]` targets in `printer.cfg` and
+whether each one needs to be rebuilt and flashed.
+
+```{.http .apirequest title="HTTP Request"}
+GET /server/firmware/targets
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.firmware.targets",
+    "id": 4656
+}
+```
+
+/// collapse-code
+```{.json .apiresponse title="Example Response"}
+{
+    "targets": {
+        "main": {
+            "preset": "stm32h743_mainboard",
+            "mcu": "mcu",
+            "device": "/dev/serial/by-id/usb-Klipper_stm32h743xx_2A0052000151323236333534-if00",
+            "mcu_version": "v2026.01.00-0-g9f0ed502",
+            "last_flashed": null,
+            "mismatch": null
+        }
+    }
+}
+```
+///
+
+/// api-response-spec
+    open: True
+
+| Field     |  Type  | Description                                          |
+| --------- | :----: | ---------------------------------------------------- |
+| `targets` | object | A [Firmware Target](#firmware-target-spec) object    |
+|           |        | for each target, keyed by the target name.           |^
+
+| Field          |  Type  | Description                                           |
+| -------------- | :----: | ----------------------------------------------------- |
+| `preset`       | string | The build preset.                                     |
+| `mcu`          | string | The Klipper `[mcu]` the target builds for.            |
+| `device`       | string | The serial device the target is flashed through.      |
+| `mcu_version`  | string | The firmware version the micro-controller reports, or |
+|                |        | `null` when it is not connected.                      |^
+| `last_flashed` | object | The record of the last flash from this panel, or      |
+|                |        | `null`.                                               |^
+| `mismatch`     | string | Why the target should be rebuilt and flashed, or      |
+|                |        | `null` when it is up to date.                         |^
+{ #firmware-target-spec } Firmware Target
+
+///
+
+## Build Firmware
+
+Builds firmware for the given targets without flashing it.  Targets build in
+parallel.  Only one build or flash job may run at a time.
+
+```{.http .apirequest title="HTTP Request"}
+POST /server/firmware/build
+Content-Type: application/json
+
+{
+    "targets": "all"
+}
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.firmware.build",
+    "params": {
+        "targets": "all"
+    },
+    "id": 4656
+}
+```
+
+/// api-parameters
+    open: True
+
+| Name      |       Type        | Default | Description                           |
+| --------- | :---------------: | ------- | ------------------------------------- |
+| `targets` | string \| [string] | `all`   | `all`, or a list of target names.     |
+
+///
+
+```{.json .apiresponse title="Example Response"}
+{
+    "started": true,
+    "action": "build",
+    "targets": ["main", "nhk"]
+}
+```
+
+## Build and Flash Firmware
+
+Builds firmware for the given targets, then flashes them one at a time.
+This is the only request that writes firmware.  It is refused while a print
+is running or paused, and the print state is checked again just before
+flashing.  Takes the same parameters as [Build Firmware](#build-firmware).
+
+```{.http .apirequest title="HTTP Request"}
+POST /server/firmware/build_and_flash
+Content-Type: application/json
+
+{
+    "targets": ["nhk"]
+}
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.firmware.build_and_flash",
+    "params": {
+        "targets": ["nhk"]
+    },
+    "id": 4656
+}
+```
+
+```{.json .apiresponse title="Example Response"}
+{
+    "started": true,
+    "action": "build_and_flash",
+    "targets": ["nhk"]
+}
+```
+
+## Get Firmware Job Status
+
+```{.http .apirequest title="HTTP Request"}
+GET /server/firmware/status
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.firmware.status",
+    "id": 4656
+}
+```
+
+/// collapse-code
+```{.json .apiresponse title="Example Response"}
+{
+    "active": true,
+    "action": "build_and_flash",
+    "targets": ["nhk"],
+    "error": null,
+    "status": {
+        "nhk": {
+            "phase": "building",
+            "log": ["  Building out/klipper.elf"]
+        }
+    }
+}
+```
+///
+
+/// api-response-spec
+    open: True
+
+| Field     |   Type   | Description                                              |
+| --------- | :------: | -------------------------------------------------------- |
+| `active`  |   bool   | Set to `true` while a job is running.                    |
+| `action`  |  string  | `build` or `build_and_flash`, for the last job.          |
+| `targets` | [string] | The targets of the last job.                             |
+| `error`   |  string  | The first error of the last job, or `null`.              |
+| `status`  |  object  | For each target, its `phase` (`queued`, `building`,      |
+|           |          | `built`, `flashing`, `done` or `error`) and the last 200 |^
+|           |          | lines of its `log`.                                      |^
+
+///
+
+## Cancel Firmware Job
+
+Stops the running build or flash job.  If Klipper was stopped for flashing,
+it is started again.
+
+```{.http .apirequest title="HTTP Request"}
+POST /server/firmware/cancel
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.firmware.cancel",
+    "id": 4656
+}
+```
+
+```{.json .apiresponse title="Example Response"}
+{
+    "cancelled": true
+}
+```
+
+## Restart All Printer Services
+
+Available when [printer_services](../configuration.md#printer_services) is
+configured.  Starts `scripts/printer-services.sh --restart`, which restarts
+Klipper, Moonraker, crowsnest, nginx and the SLA image display service, then
+restarts the micro-controllers.  It is an error if a restart is already
+running.
+
+```{.http .apirequest title="HTTP Request"}
+POST /server/printer_services/restart_all
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.printer_services.restart_all",
+    "id": 4656
+}
+```
+
+```{.json .apiresponse title="Example Response"}
+{
+    "started": true
+}
+```
+
+## Get Printer Services Restart Status
+
+```{.http .apirequest title="HTTP Request"}
+GET /server/printer_services/status
+```
+
+```{.json .apirequest title="JSON-RPC Request"}
+{
+    "jsonrpc": "2.0",
+    "method": "server.printer_services.status",
+    "id": 4656
+}
+```
+
+```{.json .apiresponse title="Example Response"}
+{
+    "running": false,
+    "log_path": "/home/pi/printer_data/logs/restart_all.log"
+}
+```
+
+/// api-response-spec
+    open: True
+
+| Field      |  Type  | Description                                      |
+| ---------- | :----: | ------------------------------------------------ |
+| `running`  |  bool  | Set to `true` while a restart is running.        |
+| `log_path` | string | The log file the restart writes its output to.   |
+
 ///

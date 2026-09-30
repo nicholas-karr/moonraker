@@ -6,9 +6,12 @@
 #
 # Handles two faults:
 #
-# 1. Klipper is in "shutdown" after an MCU communication fault. Runs
+# 1. Klipper is in "shutdown" after an MCU communication fault, or in
+#    "error" because it couldn't connect to an MCU. Runs
 #    printer_services.trigger_restart_all() (the same sequence as Mainsail's
-#    "Restart All" button). Only acts while the printer is idle.
+#    "Restart All" button). If that keeps failing and
+#    mcu_recovery_reboot_enabled is set, reboots the host once, announcing
+#    it first. Only acts while the printer is idle.
 #
 # 2. The SLA projector's serial link drops while video keeps working.
 #    Recycles the adapter's USB port once, then optionally power-cycles its
@@ -44,6 +47,15 @@ DB_NAMESPACE = "auto_recovery"
 # stop, gcode_macro's emergency_stop) as "Shutdown due to <reason>", unlike an
 # MCU fault such as "Lost communication with MCU".
 DELIBERATE_SHUTDOWN_PREFIX = "Shutdown due to "
+# Klipper's "error" state also covers config and protocol errors, which a
+# restart can't fix. Only these MCU connect failures are worth recovering.
+MCU_CONNECT_ERRORS = (
+    "Unable to connect",
+    "Unable to open serial port",
+    "Lost communication with MCU",
+)
+# Upper bound on waiting for the reboot announcement to be delivered.
+REBOOT_NOTIFY_TIMEOUT = 30.
 
 
 class AutoRecoveryComponent:
@@ -58,6 +70,9 @@ class AutoRecoveryComponent:
         )
         self.mcu_cooldown = config.getfloat(
             "mcu_recovery_cooldown_seconds", 120.0, above=0.0
+        )
+        self.mcu_reboot_enabled = config.getboolean(
+            "mcu_recovery_reboot_enabled", False
         )
 
         self.projector_recovery_enabled = config.getboolean(
@@ -125,9 +140,27 @@ class AutoRecoveryComponent:
         state = job_state.last_print_stats.get("state", "")
         return state != "printing"
 
-    async def _announce(self, message: str) -> None:
+    async def _announce(self, message: str, wait: bool = False) -> None:
         logging.info("AUTO-RECOVERY: %s", message)
-        self.server.send_event("auto_recovery_action", message)
+        fut = self.server.send_event("auto_recovery_action", message)
+        if wait:
+            # The event's future resolves once every handler, including the
+            # notifier's send, has finished.
+            try:
+                await asyncio.wait_for(fut, REBOOT_NOTIFY_TIMEOUT)
+            except asyncio.TimeoutError:
+                logging.info(
+                    "auto_recovery: announcement not delivered within %.0fs",
+                    REBOOT_NOTIFY_TIMEOUT
+                )
+
+    @staticmethod
+    def _is_mcu_fault(state: KlippyState, message: str) -> bool:
+        if state == KlippyState.SHUTDOWN:
+            return True
+        if state == KlippyState.ERROR:
+            return any(err in message for err in MCU_CONNECT_ERRORS)
+        return False
 
     async def _on_klippy_shutdown(self) -> None:
         await self._recover_from_shutdown()
@@ -136,7 +169,12 @@ class AutoRecoveryComponent:
         # Moonraker sends klippy_shutdown only for a transition into
         # shutdown, not for a Klipper that is already shut down when it
         # connects (for example the MCU fault outlived a recovery attempt).
-        if startup_state == KlippyState.SHUTDOWN:
+        # An MCU that can't be reached at startup leaves Klipper in "error",
+        # which raises no event of its own either.
+        kconn: "KlippyConnection" = self.server.lookup_component(
+            "klippy_connection"
+        )
+        if self._is_mcu_fault(startup_state, kconn.state_message):
             await self._recover_from_shutdown()
 
     def _schedule_mcu_recheck(self, delay: float) -> None:
@@ -155,7 +193,7 @@ class AutoRecoveryComponent:
         kconn: "KlippyConnection" = self.server.lookup_component(
             "klippy_connection"
         )
-        if kconn.state == KlippyState.SHUTDOWN:
+        if self._is_mcu_fault(kconn.state, kconn.state_message):
             await self._recover_from_shutdown()
 
     async def _recover_from_shutdown(self) -> None:
@@ -178,7 +216,7 @@ class AutoRecoveryComponent:
             return
         if not await self._not_printing():
             await self._announce(
-                "Klipper reported a shutdown, but a print is active - not "
+                "Klipper hit an MCU fault, but a print is active - not "
                 "attempting automatic recovery. Fix the underlying issue "
                 "and run FIRMWARE_RESTART once it's safe to."
             )
@@ -196,11 +234,16 @@ class AutoRecoveryComponent:
 
         attempt = mcu.get("attempt", 0)
         if attempt >= self.mcu_max_attempts:
+            if self.mcu_reboot_enabled and not mcu.get("rebooted"):
+                await self._reboot_host(mcu, now)
+                return
             if not mcu.get("gave_up"):
+                tried = f"{self.mcu_max_attempts} automatic recovery attempt(s)"
+                if mcu.get("rebooted"):
+                    tried += " and a host reboot"
                 await self._announce(
-                    "Klipper reported a shutdown again after "
-                    f"{self.mcu_max_attempts} automatic recovery "
-                    "attempt(s) - giving up. This needs a human: check "
+                    f"Klipper's MCU fault persists after {tried} - giving "
+                    "up. This needs a human: check "
                     "~/printer_data/logs/klippy.log and the MCU's wiring/"
                     "USB connection, then run FIRMWARE_RESTART."
                 )
@@ -213,7 +256,7 @@ class AutoRecoveryComponent:
         )
         if printer_services is None:
             await self._announce(
-                "Klipper reported a shutdown while idle, but the "
+                "Klipper hit an MCU fault while idle, but the "
                 "printer_services component isn't loaded, so automatic "
                 "recovery can't run. Run FIRMWARE_RESTART manually."
             )
@@ -221,7 +264,7 @@ class AutoRecoveryComponent:
 
         attempt += 1
         await self._announce(
-            "Klipper reported a shutdown while idle - attempting "
+            "Klipper hit an MCU fault while idle - attempting "
             f"automatic recovery (attempt {attempt}/{self.mcu_max_attempts}"
             "): restarting services and the MCU firmware. Klipper, "
             "Moonraker and this printer's web UI will be briefly "
@@ -249,6 +292,28 @@ class AutoRecoveryComponent:
             )
             self._schedule_mcu_recheck(self.mcu_cooldown)
 
+    async def _reboot_host(self, mcu: Dict[str, Any], now: float) -> None:
+        machine: "Machine" = self.server.lookup_component("machine", None)
+        if machine is None:
+            mcu["rebooted"] = True
+            await self._save_state("mcu_recovery", mcu)
+            return
+        # Saved first: the reboot ends this process, and the flag is what
+        # stops the next boot from rebooting again.
+        mcu["rebooted"] = True
+        mcu["triggered_at"] = now
+        await self._save_state("mcu_recovery", mcu)
+        await self._announce(
+            f"Klipper's MCU fault persists after {self.mcu_max_attempts} "
+            "service restart(s) - REBOOTING THE PRINTER HOST now (once per "
+            "incident). It will be unreachable for a few minutes.",
+            wait=True
+        )
+        try:
+            await machine.get_system_provider().reboot()
+        except Exception as e:
+            await self._announce(f"Automatic host reboot failed: {e}")
+
     async def _on_klippy_ready(self) -> None:
         # Fires on every normal startup too, not just after a recovery
         # attempt - only announce/reset when the stored state shows one was
@@ -259,6 +324,12 @@ class AutoRecoveryComponent:
                 await self._announce(
                     "Klipper is ready again after automatic recovery had "
                     "given up."
+                )
+                await self._save_state("mcu_recovery", {})
+            elif mcu.get("rebooted"):
+                await self._announce(
+                    "Klipper reconnected successfully after an automatic "
+                    "host reboot."
                 )
                 await self._save_state("mcu_recovery", {})
             elif mcu.get("attempt", 0) > 0:

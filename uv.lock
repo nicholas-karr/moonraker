@@ -920,19 +920,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ldap3"
-version = "2.9.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyasn1", version = "0.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
-    { name = "pyasn1", version = "0.6.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.8'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/43/ac/96bd5464e3edbc61595d0d69989f5d9969ae411866427b2500a8e5b812c0/ldap3-2.9.1.tar.gz", hash = "sha256:f3e7fc4718e3f09dda568b57100095e0ce58633bcabbed8667ce3f8fbaa4229f", size = 398830, upload-time = "2021-07-18T06:34:21.786Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4e/f6/71d6ec9f18da0b2201287ce9db6afb1a1f637dedb3f0703409558981c723/ldap3-2.9.1-py2.py3-none-any.whl", hash = "sha256:5869596fc4948797020d3f03b7939da938778a0f9e2009f7a072ccf92b8e8d70", size = 432192, upload-time = "2021-07-18T06:34:12.905Z" },
-]
-
-[[package]]
 name = "libnacl"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1372,7 +1359,6 @@ dependencies = [
     { name = "importlib-metadata", version = "8.7.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
     { name = "inotify-simple" },
     { name = "jinja2" },
-    { name = "ldap3" },
     { name = "libnacl" },
     { name = "paho-mqtt" },
     { name = "pillow", version = "9.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
@@ -1444,7 +1430,6 @@ requires-dist = [
     { name = "importlib-metadata", specifier = ">=6.7.0,<=8.7.1" },
     { name = "inotify-simple", specifier = "==2.0.1" },
     { name = "jinja2", specifier = "==3.1.6" },
-    { name = "ldap3", specifier = "==2.9.1" },
     { name = "libnacl", specifier = "==2.1.0" },
     { name = "msgspec", marker = "python_full_version >= '3.8' and extra == 'msgspec'", specifier = ">=0.18.4" },
     { name = "msgspec", marker = "python_full_version >= '3.8' and extra == 'speedups'", specifier = ">=0.18.4" },
@@ -2507,34 +2492,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/4a/56/7e18b0336c1e6c6622411dd0d3a7634b171e4d156a13b1ceaa048682454a/preprocess_cancellation-0.2.1.tar.gz", hash = "sha256:e2f1224e1ba1603bdfdbf6937caaf91082dc849e5122e80a5328aa999433ce79", size = 18019, upload-time = "2024-01-31T15:33:36.554Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/24/498d0e7fffbe3da1b2d1495f5b901a34768cb3d55e74da862635757139be/preprocess_cancellation-0.2.1-py3-none-any.whl", hash = "sha256:1b7e7f63057d09d3f85bd545c28700afdadc350be3380a1f7e5ff9f4cefea129", size = 18837, upload-time = "2024-01-31T15:33:34.808Z" },
-]
-
-[[package]]
-name = "pyasn1"
-version = "0.5.1"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version < '3.8'",
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/dc/996e5446a94627fe8192735c20300ca51535397e31e7097a3cc80ccf78b7/pyasn1-0.5.1.tar.gz", hash = "sha256:6d391a96e59b23130a5cfa74d6fd7f388dbbe26cc8f1edf39fdddf08d9d6676c", size = 147134, upload-time = "2023-11-20T20:53:01.453Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d1/75/4686d2872bf2fc0b37917cbc8bbf0dd3a5cdb0990799be1b9cbf1e1eb733/pyasn1-0.5.1-py2.py3-none-any.whl", hash = "sha256:4439847c58d40b1d0a573d07e3856e95333f1976294494c325775aeca506eb58", size = 84930, upload-time = "2023-11-20T20:52:56.135Z" },
-]
-
-[[package]]
-name = "pyasn1"
-version = "0.6.3"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.15'",
-    "python_full_version >= '3.10' and python_full_version < '3.15'",
-    "python_full_version == '3.9.*'",
-    "python_full_version >= '3.8.1' and python_full_version < '3.9'",
-    "python_full_version >= '3.8' and python_full_version < '3.8.1'",
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/5f/6583902b6f79b399c9c40674ac384fd9cd77805f9e6205075f828ef11fb2/pyasn1-0.6.3.tar.gz", hash = "sha256:697a8ecd6d98891189184ca1fa05d1bb00e2f84b5977c481452050549c8a72cf", size = 148685, upload-time = "2026-03-17T01:06:53.382Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl", hash = "sha256:a80184d120f0864a52a073acc6fc642847d0be408e7c7252f31390c0f4eadcde", size = 83997, upload-time = "2026-03-17T01:06:52.036Z" },
 ]
 
 [[package]]
