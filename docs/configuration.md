@@ -515,7 +515,8 @@ in the response.
 One shared password for Mainsail, and the only way to log in.  It registers a
 single user, `biokalico`, with this password and removes every other user
 account.  Every request then needs a login, except requests that carry the
-API key and, if `local_bypass` is set, requests from `trusted_clients`.  This
+API key and, unless `local_bypass` is turned off, requests from
+`trusted_clients`.  This
 component always loads.  If the section is missing, it is added to
 `moonraker.conf` with a generated password.
 
@@ -527,11 +528,12 @@ password:
 #   The shared password.  Leading and trailing whitespace is ignored.  When
 #   blank, a random password is generated on first start and written back
 #   into this option.  Changing the password logs out every session.
-local_bypass: False
-#   When set to True, requests from the [authorization] trusted_clients need
-#   no password, except requests that came through a Cloudflare Tunnel
-#   (these carry a Cf-Connecting-Ip or Cf-Ray header).  Only set this on a
-#   private network.  The default is False.
+local_bypass: True
+#   When True, requests from the [authorization] trusted_clients need no
+#   password, except requests that came through a Cloudflare Tunnel (these
+#   carry a Cf-Connecting-Ip or Cf-Ray header).  Set this to False if the
+#   printer is on a network shared with people who should not control it.
+#   The default is True.
 hint:
 #   A reminder shown on Mainsail's login screen.  One layer of matching
 #   quotes is removed.  The default is no hint.

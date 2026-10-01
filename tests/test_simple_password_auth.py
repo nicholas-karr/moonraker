@@ -70,15 +70,6 @@ class TestSimplePasswordAuth:
         with pytest.raises(auth.server.error, match="JWT Expired"):
             auth.decode_jwt(expired_token)
 
-    async def test_local_bypass_is_disabled_by_default(
-        self, full_server: Server
-    ):
-        auth: Authorization = full_server.lookup_component("authorization")
-        # Even a trusted loopback peer must authenticate unless an operator
-        # explicitly opts into local_bypass.
-        with pytest.raises(HTTPError):
-            await auth.authenticate_request(FakeRequest("127.0.0.1"))
-
     async def test_other_user_accounts_are_removed(self, full_server: Server):
         auth: Authorization = full_server.lookup_component("authorization")
         comp: SimplePasswordAuth = full_server.lookup_component(
@@ -118,16 +109,16 @@ class TestSimplePasswordAuthMissingSection:
         assert user.password == expected_hash
 
 
-@pytest.mark.run_paths(moonraker_conf="biokalico_components_local_bypass.conf")
+@pytest.mark.run_paths(moonraker_conf="biokalico_components.conf")
 @pytest.mark.asyncio
 class TestSimplePasswordAuthLocalBypass:
-    async def test_local_bypass_allows_trusted_ip_without_login(
+    async def test_local_bypass_allows_trusted_ip_by_default(
         self, full_server: Server
     ):
         auth: Authorization = full_server.lookup_component("authorization")
         # 127.0.0.1 is in [authorization] trusted_clients and carries no
-        # Cloudflare headers, so the opt-in local_bypass grants access with
-        # no token.
+        # Cloudflare headers, so local_bypass (on by default) grants access
+        # with no token.
         user = await auth.authenticate_request(FakeRequest("127.0.0.1"))
         assert user is not None
 
@@ -153,6 +144,17 @@ class TestSimplePasswordAuthLocalBypass:
         request = FakeRequest("203.0.113.5")
         with pytest.raises(HTTPError):
             await auth.authenticate_request(request)
+
+
+@pytest.mark.run_paths(moonraker_conf="biokalico_components_no_local_bypass.conf")
+@pytest.mark.asyncio
+class TestSimplePasswordAuthNoLocalBypass:
+    async def test_trusted_ip_needs_login_when_local_bypass_off(
+        self, full_server: Server
+    ):
+        auth: Authorization = full_server.lookup_component("authorization")
+        with pytest.raises(HTTPError):
+            await auth.authenticate_request(FakeRequest("127.0.0.1"))
 
 
 @pytest.mark.run_paths(moonraker_conf="biokalico_components_blank_password.conf")

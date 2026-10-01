@@ -15,7 +15,7 @@
 #    Mainsail logs in through the normal /access/login endpoint.
 #  - Sets force_logins and force_login_bypass_trusted on the authorization
 #    component.
-#  - local_bypass (default False) lets [authorization] trusted_clients skip
+#  - local_bypass (default True) lets [authorization] trusted_clients skip
 #    the password. Requests that came through a Cloudflare Tunnel still need
 #    it, because they arrive from localhost (see CF_HEADERS in
 #    authorization.py).
@@ -72,7 +72,7 @@ class SimplePasswordAuth:
         self.server = config.get_server()
         # TheLoginDialog.vue trims the entered password the same way.
         self.password: str = config.get("password", "").strip()
-        self.local_bypass = config.getboolean("local_bypass", False)
+        self.local_bypass = config.getboolean("local_bypass", True)
         self.hint: str = _clean_config_string(config.get("hint", ""))
 
         self.server.register_endpoint(
